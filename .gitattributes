@@ -1,0 +1,8 @@
+# シェルスクリプトは必ず LF で取り出す。
+# ⚠ CRLF で取り出されると Linux で `/bin/sh^M: bad interpreter` になる。
+# 配る物なので、受け取った側の環境（autocrlf の設定）に左右されてはならない。
+*.sh text eol=lf
+
+# 中身の差し替えに使う YAML と、compose も LF に揃える。
+*.yaml text eol=lf
+*.yml text eol=lf

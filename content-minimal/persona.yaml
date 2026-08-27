@@ -1,0 +1,85 @@
+# 最小の見本。ここを写して書き換えれば、別の案内役になる。
+name: 受付
+site:
+  public_url: https://example.com
+  source_url: https://example.com/source
+
+system_prompt: |
+  あなたは「みどり整体院」の受付です。
+  です・ます調で、2〜3文で簡潔に答えてください。
+  分からないことは正直に「分かりかねます」と答え、推測で埋めないでください。
+
+# 「この場のこと」を指す語。屋号や案内役の名を書く。
+# 書いておくと、調べ物（Wikipedia）がこの設置自身のことを外へ問い合わせない。
+self_words:
+- みどり整体院
+- みどり
+- 受付
+llm_slot: 〔LLM〕
+llm_note:
+  enabled: 決められた答えが無いご質問は、AI がお答えします
+  disabled: 決められた答えのあるご質問にのみお答えしています
+
+unknown: |
+  申し訳ありません、そのご質問にはお答えできません。
+
+  お答えできるのは次のあたりです:
+
+  - 営業時間・場所
+  - ご予約について
+  - 天気（「東京の天気は？」）
+
+  詳しくは {public} をご覧ください。
+
+# ---- 画面 ----
+ui:
+  title: みどり整体院 ご案内
+  heading: みどり整体院
+  badge: ""                      # 空にすると出ない
+  home:
+    url: ""                      # 空にすると戻りリンクを出さない
+    label: ""
+  avatar: ""                     # 顔の画像を置かない設置。丸い枠ごと消える
+  mode_label:
+    enabled: "答え方: <b>決まった答え</b>＋AI"
+    disabled: "答え方: <b>決まった答えのみ</b>（AI は使いません）"
+  intro:
+    heading: ご案内
+    lead: |
+      みどり整体院の受付です。ご予約・営業時間についてお答えします。
+    ability: |
+      お答えできるのは**営業時間・ご予約・天気**と、簡単な調べ物です。
+    prompt: 下のボタンを押すか、ご質問を入力してください。
+    note:
+      enabled: 決められた答えが無いご質問は、AI がお答えします。
+      disabled: 決められた答えのあるご質問にのみお答えしています。
+  # 画面の文言。**書かなくてよい**（書かなければ前段の既定が出る）。
+  # 案内役の口調に合わせたい、あるいは別の言語で出したいときにここを書く。
+  # ここでは「です／ます」に揃えるために書いている。
+  labels:
+    send: 送信
+    stop: 停止
+    clear: 会話を消す
+    examples: 質問の例
+    inputPlaceholder: ご質問をどうぞ（Enter で送信 / Shift+Enter で改行）
+    systemPrompt: AI への指示
+    systemPromptHint: AI への指示です。空にすると既定に戻ります。次の送信から反映されます。
+    home: 戻る
+    error: エラーが発生しました
+    emptyAnswer: 返事が空でした。もう一度お試しください。
+    stopped: 停止しました
+    cleared: 会話を消しました。この端末に残していた分も消えました。
+    restored: 前回の続きから再開しました（この端末にのみ保存しています）。
+    routeRule: 決まった答え
+    routeNoneName: 決まった答えのみ
+    routeNone: お答えできない内容
+    seconds: " 秒"
+    ollamaDown: AI に接続できていません。起動直後の場合は少し待つと繋がります。
+    modelPulling: モデルを取得しています。初回は数分かかります。
+    modelsFailed: モデル一覧を取得できませんでした
+    modelsFailedOption: 取得できませんでした
+
+  examples:
+    - 営業時間は？
+    - 予約したい
+    - 東京の天気は？

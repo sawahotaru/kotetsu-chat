@@ -1,0 +1,8 @@
+# 秘密値と、その場かぎりのもの
+.env
+*.pyc
+__pycache__/
+.pytest_cache/
+
+# 自分の内容を置く場所（配った先の人が作る）
+/my-content/

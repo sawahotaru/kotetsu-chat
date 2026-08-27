@@ -1,0 +1,711 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>チャット</title>
+<link rel="icon" href="api/avatar">
+<style>
+  :root{
+    color-scheme: dark;
+    --bg:#0f172a; --panel:#1e293b; --panel2:#172033; --line:#334155;
+    --text:#e2e8f0; --muted:#94a3b8; --accent:#7dd3fc; --accent2:#38bdf8;
+    --user:#1d4ed8; --warn:#fbbf24; --err:#f87171; --ok:#4ade80;
+    --avatar:url("api/avatar");
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--text);
+    font-family:system-ui,-apple-system,"Segoe UI",sans-serif;
+    display:flex; flex-direction:column; min-height:100dvh;
+  }
+  header{
+    padding:.8rem 1rem; border-bottom:1px solid var(--line); background:var(--panel2);
+    display:flex; align-items:center; gap:.7rem; flex-wrap:wrap;
+  }
+  .badge{
+    background:linear-gradient(135deg,#00ADD8,#3776AB); color:#fff; font-weight:800;
+    padding:.25em .9em; border-radius:999px; font-size:.8rem; letter-spacing:.02em;
+  }
+  body.faceless .face, body.faceless .face-lg{display:none}
+  .face{
+    width:30px; height:30px; border-radius:50%; flex:none;
+    background:var(--avatar) center/cover no-repeat;
+    border:1px solid var(--line); box-shadow:0 1px 4px rgba(0,0,0,.5);
+  }
+  h1{margin:0; font-size:1.05rem; font-weight:700}
+  header .spacer{flex:1}
+  header a{color:var(--accent); text-decoration:none; font-size:.85rem}
+  header a:hover{text-decoration:underline}
+
+  /* ---- 設定バー ---- */
+  .settings[hidden]{display:none}
+  .settings{
+    display:flex; gap:.9rem; align-items:center; flex-wrap:wrap;
+    padding:.6rem 1rem; border-bottom:1px solid var(--line); background:var(--panel);
+    font-size:.85rem;
+  }
+  .settings label{display:flex; align-items:center; gap:.4rem; color:var(--muted)}
+  select,input[type=range],textarea{
+    background:var(--bg); color:var(--text); border:1px solid var(--line);
+    border-radius:8px; padding:.35rem .5rem; font:inherit;
+  }
+  select{min-width:11rem}
+  .sys-toggle{
+    background:none;border:1px solid var(--line);color:var(--muted);
+    border-radius:8px;padding:.35rem .7rem;cursor:pointer;font:inherit;
+  }
+  .sys-toggle:hover{color:var(--text);border-color:var(--accent)}
+  #systemWrap{display:none; padding:0 1rem .7rem; background:var(--panel)}
+  #systemWrap textarea{width:100%; min-height:4.5rem; resize:vertical}
+  #systemWrap .hint{color:var(--muted); font-size:.75rem; margin:.35rem 0 0}
+
+  /* ---- 会話 ---- */
+  main{flex:1; overflow-y:auto; padding:1rem; display:flex; flex-direction:column; gap:.9rem}
+  .msg{max-width:min(46rem,92%); padding:.7rem .95rem; border-radius:14px; line-height:1.65;
+       white-space:pre-wrap; word-wrap:break-word; overflow-wrap:anywhere}
+  .msg.user{align-self:flex-end; background:var(--user); border-bottom-right-radius:4px}
+  .msg.bot{
+    align-self:flex-start; background:var(--panel); border-bottom-left-radius:4px;
+    position:relative; margin-left:42px;
+    /* 顔の分だけ右に寄るので、幅の上限からも同じだけ引く（横に溢れさせない） */
+    max-width:min(46rem, calc(92% - 42px));
+  }
+  .msg.bot::before{
+    content:""; position:absolute; left:-42px; top:0;
+    width:32px; height:32px; border-radius:50%;
+    background:var(--avatar) center/cover no-repeat;
+    border:1px solid var(--line); box-shadow:0 1px 4px rgba(0,0,0,.45);
+  }
+  @media (max-width:480px){
+    .msg.bot{margin-left:34px; max-width:calc(94% - 34px)}
+    .msg.bot::before{left:-34px; width:26px; height:26px}
+  }
+  .msg .meta{display:block; margin-top:.5rem; font-size:.72rem; color:var(--muted)}
+  .msg a{color:var(--accent)}
+  .msg code{background:var(--panel2); padding:.1em .38em; border-radius:5px; font-size:.92em}
+  .msg strong{color:#fff}
+  /* 表だけは pre-wrap を解く。桁が縦に潰れるため。狭い画面では横に送る */
+  .msg table{
+    white-space:normal; border-collapse:collapse; margin:.55rem 0;
+    font-size:.9em; display:block; overflow-x:auto; max-width:100%;
+  }
+  .msg th,.msg td{border:1px solid var(--line); padding:.32rem .6rem; text-align:left}
+  .msg th{background:var(--panel2); font-weight:700}
+  .notice{align-self:center; font-size:.8rem; color:var(--muted); text-align:center; max-width:34rem}
+  .notice.error{color:var(--err)}
+  .cursor::after{content:"▋"; animation:blink 1s steps(2) infinite; color:var(--accent)}
+  @keyframes blink{50%{opacity:0}}
+  .intro{align-self:center; text-align:center; color:var(--muted); max-width:34rem; margin-top:1.6rem}
+  .face-lg{
+    display:block; width:78px; height:78px; margin:0 auto .8rem; border-radius:50%;
+    background:var(--avatar) center/cover no-repeat;
+    border:2px solid var(--line); box-shadow:0 3px 14px rgba(0,0,0,.55);
+  }
+  .intro .lead{margin:.6rem 0 0; line-height:1.75}
+  .intro .lead.small{font-size:.85rem}
+  .intro a{color:var(--accent)}
+  .intro h2{color:var(--text); font-size:1.1rem; margin:0 0 .5rem}
+  .intro code{background:var(--panel); padding:.12em .4em; border-radius:5px; color:var(--accent)}
+  .chips{display:flex; flex-wrap:wrap; gap:.5rem; justify-content:center; margin-top:1.4rem}
+  /* 入力欄の上に出す版。会話の途中でも質問例へ戻れるように */
+  .chips[hidden]{display:none}
+  .chips.bar{max-width:52rem; margin:0 auto .6rem; justify-content:flex-start}
+  .chips.bar button{font-size:.8rem; padding:.34rem .8rem}
+  .chips button{
+    background:var(--panel); color:var(--text); border:1px solid var(--line);
+    border-radius:999px; padding:.42rem .95rem; font:inherit; font-size:.85rem; cursor:pointer;
+  }
+  .chips button:hover{border-color:var(--accent); color:var(--accent)}
+  .meta .rule{color:var(--ok)}
+  .mode{color:var(--muted); font-size:.82rem}
+  .mode b{color:var(--ok); font-weight:700}
+
+  /* ---- 入力 ---- */
+  footer{border-top:1px solid var(--line); background:var(--panel2); padding:.7rem 1rem}
+  form{display:flex; gap:.6rem; align-items:flex-end; max-width:52rem; margin:0 auto}
+  #input{flex:1; min-height:2.7rem; max-height:9rem; resize:none; line-height:1.5}
+  button.send{
+    background:var(--accent2); color:#04283a; border:0; border-radius:10px;
+    padding:.6rem 1.2rem; font:inherit; font-weight:700; cursor:pointer; white-space:nowrap;
+  }
+  button.send:disabled{background:var(--line); color:var(--muted); cursor:not-allowed}
+  button.stop{background:var(--err); color:#3b0a0a}
+  .counter{max-width:52rem; margin:.35rem auto 0; font-size:.72rem; color:var(--muted); text-align:right}
+  .counter.over{color:var(--err)}
+</style>
+</head>
+<body>
+
+<header>
+  <span class="face" aria-hidden="true"></span>
+  <h1 id="heading"></h1>
+  <span class="badge" id="badge"></span>
+  <span class="spacer"></span>
+  <a id="home" href="../"></a>
+</header>
+
+<div class="settings" id="llmSettings" hidden>
+  <label>モデル
+    <select id="model"><option value="">読み込み中…</option></select>
+  </label>
+  <label>temperature
+    <input type="range" id="temp" min="0" max="1.5" step="0.1" value="0.7">
+    <span id="tempVal" style="color:var(--text);min-width:1.9rem">0.7</span>
+  </label>
+  <button type="button" class="sys-toggle" id="sysToggle">システムプロンプト</button>
+</div>
+<div class="settings">
+  <span id="modeLabel" class="mode"></span>
+  <span class="spacer"></span>
+  <button type="button" class="sys-toggle" id="examples">質問例</button>
+  <button type="button" class="sys-toggle" id="clear">会話をクリア</button>
+</div>
+<div id="systemWrap">
+  <textarea id="system" spellcheck="false"></textarea>
+  <p class="hint" id="systemHint">モデルへの指示です。空にすると既定値に戻ります。変更は次の送信から反映されます。</p>
+</div>
+
+<main id="log">
+  <div class="intro" id="intro">
+    <span class="face-lg" aria-hidden="true"></span>
+    <h2 id="introHeading"></h2>
+    <p class="lead" id="introLead"></p>
+    <p id="introBody" class="lead small"></p>
+    <p class="lead small" id="introAbility"></p>
+    <p class="lead small" id="introPrompt"></p>
+    <div class="chips" id="chips"></div>
+  </div>
+</main>
+
+<footer>
+  <div class="chips bar" id="chipsBar" hidden></div>
+  <form id="form">
+    <textarea id="input" placeholder="メッセージを入力（Enter で送信 / Shift+Enter で改行）" rows="1"></textarea>
+    <button type="submit" class="send" id="send">送信</button>
+  </form>
+  <div class="counter" id="counter"></div>
+</footer>
+
+<script>
+(() => {
+  "use strict";
+
+  const MAX_CHARS = 2000;   // 前段(Go)の CHAT_MAX_MESSAGE_CHARS と揃える
+  const MAX_HISTORY = 8;    // 同 CHAT_MAX_HISTORY
+
+  const $ = (id) => document.getElementById(id);
+  const log = $("log"), input = $("input"), form = $("form"), sendBtn = $("send");
+  const modelSel = $("model"), temp = $("temp"), tempVal = $("tempVal");
+  const systemBox = $("system"), counter = $("counter");
+
+  // {role, content} の並び。**この端末のブラウザの中だけに存在する**。
+  // サーバーには一切残さない（残さないと約束している以上、残せない）。
+  // localStorage に置くので、再読み込みやタブを閉じても続きから話せる。
+  let history = [];
+
+  const STORE_KEY = "chat.history.v1";
+
+  function saveHistory() {
+    // 私用の端末とは限らない。ブラウザの設定で localStorage が使えないこともある。
+    // 保存できないこと自体は会話の妨げにならないので、黙って諦める。
+    try {
+      localStorage.setItem(STORE_KEY, JSON.stringify(history));
+    } catch (_) { /* 容量超過・プライベートモード等。無視してよい */ }
+  }
+
+  function loadHistory() {
+    try {
+      const raw = localStorage.getItem(STORE_KEY);
+      if (!raw) return [];
+      const parsed = JSON.parse(raw);
+      if (!Array.isArray(parsed)) return [];
+      // 中身は利用者が書き換えられる。後段に渡す前にここで形を確かめる
+      // （壊れた形のまま送ると 400 になり、以後ずっと会話できなくなる）。
+      return parsed
+        .filter((m) => m && (m.role === "user" || m.role === "assistant")
+                       && typeof m.content === "string" && m.content.length > 0
+                       && m.content.length <= MAX_CHARS)
+        .slice(-MAX_HISTORY);
+    } catch (_) {
+      return [];
+    }
+  }
+
+  function forgetHistory() {
+    try { localStorage.removeItem(STORE_KEY); } catch (_) { /* 同上 */ }
+  }
+
+  let controller = null;     // 生成中の AbortController
+  let defaultSystem = "";
+  let llmEnabled = true;
+
+  // ---- 表示 ----
+
+  function hideIntro() { const i = $("intro"); if (i) i.hidden = true; }
+  function showIntro() { const i = $("intro"); if (i) i.hidden = false; }
+
+  // 質問例。案内の中と、入力欄の上の帯と、二箇所から同じ一覧を描く。
+  // 一覧をここに一つだけ持つのは、片方だけ古くなるのを防ぐため。
+  // 中身は後段（内容ファイル）から受け取る。取れるまでは空。
+  let EXAMPLES = [];
+  let personaModeLabel = "";
+
+  // 画面の文言（ボタン・報せ）。内容ファイルの ui.labels で差し替えられる。
+  //
+  // ⚠ 既定値はここに残す。内容ファイルに何も書かれていない設置でも画面が成立するように。
+  //   L() は「書いてあればそれ、無ければ既定」を返すだけの仕掛けで、訳語表ではない。
+  //   案内役の口調に合わせたい／別の言語で出したいときは ui.labels に書く。
+  let LABELS = {};
+  const L = (key, fallback) => {
+    const v = LABELS[key];
+    return (typeof v === "string" && v !== "") ? v : fallback;
+  };
+
+  function renderChips(el) {
+    if (!el) return;
+    el.textContent = "";
+    for (const q of EXAMPLES) {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = q;
+      el.appendChild(b);
+    }
+    el.addEventListener("click", (e) => {
+      if (e.target.tagName !== "BUTTON") return;
+      // 生成中や、モデルが選べていないときは受け付けない（送信ボタンと同じ扱い）
+      if (controller || (llmEnabled && !modelSel.value)) return;
+      $("chipsBar").hidden = true;
+      send(e.target.textContent);
+    });
+  }
+
+  // 吹き出しの Markdown を描く。
+  //
+  // ⚠ **必ず先に無害化してから**組み立てること。ここは LLM の出力も通る道で、
+  //    素通しすれば任意の HTML を差し込まれる。順序を守るのが唯一の防ぎ方。
+  //    許すのは 太字・コード・リンク・表 の四つだけ。リンクは https? に限る
+  //    （javascript: を弾くため）。
+  function renderMarkdown(src) {
+    const esc = (t) => t
+      .replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
+
+    // 組み上げた HTML を退避しておく器。本文の置換に巻き込まれないようにする。
+    // 目印には本文に現れ得ない制御文字を使う。
+    const MARK = String.fromCharCode(1);
+    const slots = [];
+    const slot = (html) => MARK + (slots.push(html) - 1) + MARK;
+
+    const link = (url, label) =>
+      '<a href="' + url + '" target="_blank" rel="noopener noreferrer">' + label + '</a>';
+
+    function inline(t) {
+      let x = esc(t);
+      x = x.replace(/`([^`\n]+)`/g, (_, c) => "<code>" + c + "</code>");
+      x = x.replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g,
+                    (_, label, url) => slot(link(url, label)));
+      // 素の URL。直前が行頭か空白か開き括弧のときだけ拾う（組んだ札を壊さぬため）
+      x = x.replace(/(^|[\s(])(https?:\/\/[^\s<>"']+[^\s<>"'.,、。)])/g,
+                    (_, pre, url) => pre + slot(link(url, url)));
+      x = x.replace(/\*\*([^*\n]+)\*\*/g, "<strong>$1</strong>");
+      return x;
+    }
+
+    // 表（| で始まる行の塊）を先に組む
+    let out = src.replace(/(?:^[ \t]*\|.*\|[ \t]*$\n?)+/gm, (block) => {
+      const rows = block.trim().split("\n").map(
+        (l) => l.trim().replace(/^\||\|$/g, "").split("|").map((c) => c.trim())
+      );
+      // |---|---| の区切り行は出さない
+      const body = rows.filter((r) => !r.every((c) => /^:?-{2,}:?$/.test(c)));
+      if (body.length < 2) return block;   // 表として成り立たぬなら素のまま
+      const head = body.shift();
+      return slot(
+        "<table><thead><tr>" + head.map((c) => "<th>" + inline(c) + "</th>").join("")
+        + "</tr></thead><tbody>"
+        + body.map((r) => "<tr>" + r.map((c) => "<td>" + inline(c) + "</td>").join("") + "</tr>").join("")
+        + "</tbody></table>"
+      );
+    });
+
+    const RESTORE = new RegExp(MARK + "(\\d+)" + MARK, "g");
+    return inline(out).replace(RESTORE, (_, i) => slots[i]);
+  }
+
+  function addMessage(role, text) {
+    hideIntro();
+    const el = document.createElement("div");
+    el.className = "msg " + (role === "user" ? "user" : "bot");
+    // 利用者の言葉は描かない。書いた通りに見えるのが正しく、
+    // 自分の入力が勝手に飾られるのは気味が悪いゆえ。
+    if (role === "user") el.textContent = text;
+    else el.innerHTML = renderMarkdown(text);
+    log.appendChild(el);
+    scrollToEnd();
+    return el;
+  }
+
+  function addNotice(text, isError) {
+    // 案内は畳まない。起動直後のお知らせだけで名乗りが消えてしまうため。
+    const el = document.createElement("div");
+    el.className = "notice" + (isError ? " error" : "");
+    el.textContent = text;
+    log.appendChild(el);
+    scrollToEnd();
+    return el;
+  }
+
+  // 既に一番下を見ているときだけ追従する（過去を読んでいる最中に飛ばされないように）
+  function scrollToEnd() {
+    const nearBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 120;
+    if (nearBottom) log.scrollTop = log.scrollHeight;
+  }
+
+  // ---- モデル一覧 ----
+
+  // 画面に出す文言と顔は**後段が持っている**。ここで取りに行って流し込む。
+  //
+  // 前段に埋め込まないのは、内容ファイル(content/)を差し替えたときに
+  // 表題や名乗りだけ古いまま残るのを避けるため。器と中身を混ぜない。
+  async function loadPersona() {
+    let p;
+    try {
+      const res = await fetch("api/persona");
+      if (!res.ok) throw new Error("status " + res.status);
+      p = await res.json();
+    } catch (e) {
+      // 文言が取れなくても会話はできる。空のまま進める。
+      console.warn("案内役の情報を取得できませんでした", e);
+      return;
+    }
+
+    if (p.title) document.title = p.title;
+    if (p.heading) $("heading").textContent = p.heading;
+
+    const badge = $("badge");
+    if (p.badge) badge.textContent = p.badge; else badge.hidden = true;
+
+    const home = $("home");
+    if (p.home && p.home.url) {
+      home.href = p.home.url;
+      home.textContent = p.home.label || L("home", "戻る");
+    } else {
+      home.hidden = true;
+    }
+
+    // 顔が無い設置では、丸い枠だけが残らないように消す。
+    if (!p.has_avatar) document.body.classList.add("faceless");
+
+    const intro = p.intro || {};
+    if (intro.heading) $("introHeading").textContent = intro.heading;
+    // 名乗りは Markdown で書ける（太字とリンク）。描く前に必ず無害化される。
+    if (intro.lead) $("introLead").innerHTML = renderMarkdown(intro.lead.trim());
+    if (intro.ability) $("introAbility").innerHTML = renderMarkdown(intro.ability.trim());
+    if (intro.prompt) $("introPrompt").textContent = intro.prompt;
+    // LLM の有無で変わる一文は、後段が確定させたものをそのまま出す。
+    if (intro.note) $("introBody").innerHTML = renderMarkdown(intro.note.trim());
+
+    if (p.mode_label) personaModeLabel = p.mode_label;
+
+    // 画面の文言。受け取ってから、既に描かれている所へ流し込む。
+    LABELS = (p.labels && typeof p.labels === "object") ? p.labels : {};
+    $("send").textContent = L("send", "送信");
+    $("clear").textContent = L("clear", "会話をクリア");
+    $("examples").textContent = L("examples", "質問例");
+    $("sysToggle").textContent = L("systemPrompt", "システムプロンプト");
+    $("systemHint").textContent = L("systemPromptHint",
+      "モデルへの指示です。空にすると既定値に戻ります。変更は次の送信から反映されます。");
+    $("input").placeholder = L("inputPlaceholder",
+      "メッセージを入力（Enter で送信 / Shift+Enter で改行）");
+
+    if (Array.isArray(p.examples) && p.examples.length) {
+      EXAMPLES = p.examples;
+      renderChips($("chips"));
+      renderChips($("chipsBar"));
+    }
+  }
+
+  async function loadModels() {
+    // ⚠ 文言（mode_label・labels）は persona が持っている。届く前にここが走ると、
+    //   案内役の言葉ではなく中立の既定が出てしまう。どちらが先に返るか次第で
+    //   画面の文言が変わる——実際に、器を起こした直後だけ文面が違う形で踏んだ。
+    //   持ち回るのは局所の一行で済むので、待ってから書く。
+    await personaReady;
+    try {
+      const res = await fetch("api/models");
+      if (!res.ok) throw new Error("status " + res.status);
+      const data = await res.json();
+
+      // LLM が無効な公開版では、モデルや temperature を出す意味が無い。
+      // 「何でも答える AI」だと誤解させないためにも、素直に規則ボットだと名乗る。
+      llmEnabled = data.llm_enabled !== false;
+      $("llmSettings").hidden = !llmEnabled;
+      // 文言は内容ファイル側が持つ（案内役の言葉なので人格に合わせる）。
+      // 書かれていない設置のために、中立の既定だけここに残す。
+      $("modeLabel").innerHTML = personaModeLabel || (llmEnabled
+        ? L("modeLlm", '答え方: <b>決まった答え</b>＋LLM')
+        : L("modeRules", '答え方: <b>決まった答えのみ</b>（LLM は使いません）'));
+
+      if (!llmEnabled) { updateSendState(); return; }
+
+      defaultSystem = data.system_prompt || "";
+      systemBox.placeholder = defaultSystem;
+
+      modelSel.innerHTML = "";
+      for (const m of data.models) {
+        const opt = document.createElement("option");
+        opt.value = m.name;
+        opt.textContent = m.ready ? m.name
+          : m.status === "pulling" ? `${m.name}（取得中…）`
+          : m.status.startsWith("error") ? `${m.name}（失敗）`
+          : `${m.name}（準備待ち）`;
+        opt.disabled = !m.ready;
+        modelSel.appendChild(opt);
+      }
+      const ready = data.models.find((m) => m.ready);
+      if (ready) modelSel.value = ready.name;
+
+      if (!data.ollama_reachable) {
+        addNotice(L("ollamaDown", "推論エンジン（Ollama）に接続できていません。起動直後の場合は少し待つと繋がります。"), true);
+      } else if (!ready) {
+        // 初回起動はモデルのダウンロードに数分かかる。黙って待たせない。
+        addNotice(L("modelPulling", "モデルを取得しています。初回は数分かかります。自動で確認し続けます…"));
+        setTimeout(loadModels, 15000);
+      }
+      updateSendState();
+    } catch (e) {
+      modelSel.innerHTML = '<option value=""></option>';
+      modelSel.firstChild.textContent = L("modelsFailedOption", "取得できませんでした");
+      addNotice(L("modelsFailed", "モデル一覧を取得できませんでした") + ": " + e.message, true);
+    }
+  }
+
+  // ---- 送信 ----
+
+  function updateSendState() {
+    const len = [...input.value.trim()].length;
+    const ready = !llmEnabled || modelSel.value;   // 規則のみならモデル選択は要らない
+    counter.textContent = len ? `${len} / ${MAX_CHARS}` : "";
+    counter.classList.toggle("over", len > MAX_CHARS);
+    if (!controller) {
+      sendBtn.disabled = len === 0 || len > MAX_CHARS || !ready;
+    }
+  }
+
+  function setGenerating(on) {
+    if (on) {
+      sendBtn.textContent = L("stop", "停止");
+      sendBtn.classList.add("stop");
+      sendBtn.disabled = false;
+    } else {
+      controller = null;
+      sendBtn.textContent = L("send", "送信");
+      sendBtn.classList.remove("stop");
+      updateSendState();
+    }
+  }
+
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    if (controller) { controller.abort(); return; }  // 生成中は停止ボタンとして働く
+    const text = input.value.trim();
+    if (!text || [...text].length > MAX_CHARS) return;
+    input.value = "";
+    input.style.height = "auto";
+    send(text);
+  });
+
+  async function send(text) {
+    addMessage("user", text);
+    history.push({ role: "user", content: text });
+    if (history.length > MAX_HISTORY) history = history.slice(-MAX_HISTORY);
+
+    const bubble = addMessage("assistant", "");
+    bubble.classList.add("cursor");
+    let answer = "";
+    let statusEl = null;
+
+    controller = new AbortController();
+    setGenerating(true);
+
+    try {
+      const res = await fetch("api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: modelSel.value,
+          messages: history,
+          temperature: parseFloat(temp.value),
+          system: systemBox.value.trim(),
+        }),
+        signal: controller.signal,
+      });
+
+      if (!res.ok) {
+        // SSE を始める前に弾かれたケース（レート制限・入力不正など）は JSON で返る
+        let msg = L("error", "エラーが発生しました") + "（" + res.status + "）";
+        try { const j = await res.json(); if (j.error) msg = j.error; } catch (_) {}
+        throw new Error(msg);
+      }
+
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+
+      // SSE を自前で解く（EventSource は POST を送れないため fetch で受ける）
+      for (;;) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+
+        let sep;
+        while ((sep = buf.indexOf("\n\n")) >= 0) {
+          const raw = buf.slice(0, sep);
+          buf = buf.slice(sep + 2);
+
+          const dataLine = raw.split("\n").find((l) => l.startsWith("data: "));
+          if (!dataLine) continue;
+          let ev;
+          try { ev = JSON.parse(dataLine.slice(6)); } catch (_) { continue; }
+
+          if (ev.type === "token") {
+            if (statusEl) { statusEl.remove(); statusEl = null; }
+            answer += ev.text;
+            bubble.textContent = answer;
+            scrollToEnd();
+          } else if (ev.type === "status") {
+            if (!statusEl) statusEl = addNotice(ev.message);
+            else statusEl.textContent = ev.message;
+          } else if (ev.type === "done") {
+            // 出来上がってから描く。流れている途中の「**」は対になっておらず、
+            // 一文字来るたびに描き直すと文字が踊る。
+            bubble.innerHTML = renderMarkdown(answer);
+            // どちらが答えたかを見せる。この構成の要点そのものなので隠さない。
+            const meta = document.createElement("span");
+            meta.className = "meta";
+            if (ev.route === "rule") {
+              meta.innerHTML = '<span class="rule">● </span>';
+              meta.firstChild.append(L("routeRule", "ルールで即答"));
+              const bits = [];
+              if (ev.intent) bits.push(ev.intent);
+              if (ev.elapsed_seconds !== undefined) bits.push(ev.elapsed_seconds + L("seconds", " 秒"));
+              if (bits.length) meta.innerHTML += " · " + bits.join(" · ");
+            } else if (ev.route === "none") {
+              meta.innerHTML = '<span class="rule">● </span>';
+              meta.firstChild.append(L("routeNoneName", "規則ボット"));
+              meta.append(" · " + L("routeNone", "心得の外"));
+            } else {
+              const bits = ["◆ LLM", ev.model];
+              if (ev.tokens_per_second) bits.push(ev.tokens_per_second + " tok/s");
+              if (ev.elapsed_seconds) bits.push(ev.elapsed_seconds + L("seconds", " 秒"));
+              meta.textContent = bits.filter(Boolean).join(" · ");
+            }
+            bubble.appendChild(meta);
+          } else if (ev.type === "error") {
+            throw new Error(ev.message);
+          }
+        }
+      }
+
+      if (statusEl) statusEl.remove();
+      if (answer) {
+        history.push({ role: "assistant", content: answer });
+      } else {
+        bubble.remove();
+        addNotice(L("emptyAnswer", "応答が空でした。もう一度お試しください。"), true);
+      }
+    } catch (e) {
+      if (statusEl) statusEl.remove();
+      if (e.name === "AbortError") {
+        // 途中まででも会話として残す。中断したことは本文に印を付けて示す。
+        if (answer) {
+          bubble.innerHTML = renderMarkdown(answer + "\n\n…（" + L("stopped", "停止しました") + "）");
+          history.push({ role: "assistant", content: answer });
+        } else {
+          bubble.remove();
+          addNotice(L("stopped", "停止しました") + "。");
+        }
+      } else {
+        if (!answer) bubble.remove();
+        addNotice(e.message, true);
+        // 失敗した質問は履歴から外す。残すと次の送信で同じ失敗を繰り返しやすい。
+        if (history.length && history[history.length - 1].role === "user") history.pop();
+      }
+    } finally {
+      bubble.classList.remove("cursor");
+      setGenerating(false);
+      // 成功・中断・失敗のどれで抜けても、ここで一度だけ書き出す。
+      // 各 push の隣に置くと必ずどこかで書き忘れる。
+      saveHistory();
+      input.focus();
+    }
+  }
+
+  // ---- 入力まわり ----
+
+  input.addEventListener("input", () => {
+    input.style.height = "auto";
+    input.style.height = Math.min(input.scrollHeight, 144) + "px";
+    updateSendState();
+  });
+
+  input.addEventListener("keydown", (e) => {
+    // IME 変換中の Enter は送信しない
+    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
+      e.preventDefault();
+      form.requestSubmit();
+    }
+  });
+
+  temp.addEventListener("input", () => { tempVal.textContent = temp.value; });
+  modelSel.addEventListener("change", updateSendState);
+
+  $("examples").addEventListener("click", () => {
+    const bar = $("chipsBar");
+    bar.hidden = !bar.hidden;
+    if (!bar.hidden) scrollToEnd();
+  });
+
+  $("sysToggle").addEventListener("click", () => {
+    const w = $("systemWrap");
+    w.style.display = w.style.display === "block" ? "none" : "block";
+  });
+
+  $("clear").addEventListener("click", () => {
+    if (controller) controller.abort();
+    history = [];
+    forgetHistory();
+    // 案内は残す。log.innerHTML="" だと案内ごと消え、質問例へ戻れなくなる。
+    for (const el of [...log.querySelectorAll(".msg, .notice")]) el.remove();
+    showIntro();
+    addNotice(L("cleared", "会話をクリアしました。この端末に残していた分も消えました。"));
+  });
+
+  // 質問例。何を聞けばよいか分からない人が最初の一手を踏み出せるように。
+  renderChips($("chips"));
+  renderChips($("chipsBar"));
+
+  // 前回の続きを復元する。画面にも並べ直さないと、見えない履歴を抱えたまま
+  // 話し始めることになり、案内役の返事だけが文脈を知っている状態になる。
+  function restore() {
+    history = loadHistory();
+    if (!history.length) return;
+    for (const m of history) addMessage(m.role, m.content);
+    addNotice(L("restored", "前回の続きから再開しました（この端末にのみ保存しています）。"));
+  }
+
+  // 文言が入ってから会話を戻す。順番が逆だと、名乗りの無い画面に
+  // 過去の会話だけが並ぶ一瞬が出る。
+  //
+  // ⚠ loadModels も同じ約束を待つ（上の注意）。取りに行くのは並行のままで、
+  //   書き込む順だけを決めている。
+  const personaReady = loadPersona();
+  personaReady.then(restore);
+  loadModels();
+  updateSendState();
+  input.focus();
+})();
+</script>
+</body>
+</html>

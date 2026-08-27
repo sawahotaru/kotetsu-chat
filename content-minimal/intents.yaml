@@ -1,0 +1,37 @@
+- name: hours
+  examples: [営業時間は, 何時からやってますか, 何時までですか, 定休日は]
+  must: [営業, 何時, 定休, 開い, 閉ま]
+  answer: |
+    **平日** 9:00〜19:00 ／ **土曜** 9:00〜17:00
+    日曜・祝日はお休みです。
+
+    ご予約は {public} から承ります。
+
+- name: booking
+  examples: [予約したい, 予約はできますか, 空いてますか]
+  must: [予約, 空い]
+  priority: 2
+  answer: |
+    ご予約は {public} からお願いします。
+    日付を選ぶと、空いているお時間が表示されます。
+
+- name: greeting
+  examples: [こんにちは, おはよう, はじめまして]
+  answer: こんにちは。ご用件をお聞かせください。
+
+- name: weather
+  examples: [天気を教えて, 今日の天気, 明日の天気は]
+  must: [天気, 気温, 傘, 雨]
+  priority: 2
+  handler: weather
+
+- name: lookup
+  examples: [とは何ですか, について教えて, って何]
+  must: [とは, って何, について, 意味, 調べ]
+  handler: wikipedia
+  matcher: wikipedia
+
+- name: shop
+  examples: [商品を教えて, おすすめは]
+  must: [商品, おすすめ]
+  handler: products

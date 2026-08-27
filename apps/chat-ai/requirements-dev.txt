@@ -1,0 +1,2 @@
+# 試験にだけ要るもの。動かすだけなら requirements.txt で足りる。
+pytest==8.*

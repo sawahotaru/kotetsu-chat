@@ -1,0 +1,100 @@
+# チャットだけを動かす compose。
+#
+# lab の統合 compose（../../docker-compose.yml）には Caddy・PostgreSQL・EC・
+# 予約システム・バックアップまで入っている。チャットを人に渡すのにそれは要らない。
+# ここは **前段(Go) + 後段(Python)** の二つだけ。LLM を使うときだけ ollama が増える。
+#
+#   docker compose up -d --build        規則だけで応答（LLM 無し・推奨）
+#   docker compose --profile llm up -d --build   LLM も使う（重い。下の注意を読むこと）
+#
+# → http://127.0.0.1:8080/
+#
+# ⚠ **127.0.0.1 にだけ出している。** 0.0.0.0 にすると LAN の誰でも触れる。
+#    外へ出すときは前に TLS を張った逆代理（Caddy / nginx）を置くこと。
+#    このまま公開してはならない理由は README.md の「公開するときの注意」に書いた。
+#
+# ⚠ **このフォルダだけをコピーしても動かない。** 下の build が指す
+#    apps/chat-ai と apps/chat-gateway が要る（ここには器しか無い）。
+#    持ち出すなら `./bundle.sh` で、要るものを揃えた一つのフォルダを作る。
+#    CHAT_SRC はその「要るものの根」で、既定はこの repo（../..）。
+
+name: chat
+
+services:
+  # 前段。画面を配り、レート制限・順番待ち・入力長の上限を掛けてから後段へ渡す。
+  # 外に face するのはこれだけ。
+  chat-gateway:
+    build: ${CHAT_SRC:-.}/apps/chat-gateway
+    restart: unless-stopped
+    mem_limit: 64m
+    ports:
+      # ⚠ 左辺の 127.0.0.1 を外さないこと（上の注意）。
+      - "${CHAT_BIND:-127.0.0.1}:${CHAT_PORT:-8080}:8080"
+    environment:
+      CHAT_AI_URL: http://chat-ai:8000
+      # 同時に生成する本数。⚠ CPU 推論では 1 から上げない
+      #（2本流すと両方が遅くなるだけで、捌ける数は増えない）。
+      CHAT_MAX_CONCURRENT: ${CHAT_MAX_CONCURRENT:-1}
+      # IP ごとのレート制限。公開するなら**必ず**掛ける（README の注意を参照）。
+      CHAT_RATE_PER_MIN: ${CHAT_RATE_PER_MIN:-12}
+      CHAT_RATE_BURST: ${CHAT_RATE_BURST:-5}
+      CHAT_MAX_MESSAGE_CHARS: ${CHAT_MAX_MESSAGE_CHARS:-2000}
+      CHAT_MAX_HISTORY: ${CHAT_MAX_HISTORY:-8}
+      CHAT_QUEUE_WAIT_SECONDS: ${CHAT_QUEUE_WAIT_SECONDS:-30}
+      CHAT_GEN_TIMEOUT_SECONDS: ${CHAT_GEN_TIMEOUT_SECONDS:-180}
+      # この口から LLM を使わせるか。既定 0＝規則で答えられることだけ答える。
+      # ⚠ 利用者側からは変更できない（前段が自分の設定値で組み直して後段へ送る）。
+      CHAT_ALLOW_LLM: ${CHAT_ALLOW_LLM:-0}
+    depends_on:
+      - chat-ai
+
+  # 後段。意図分類して規則で答え、拾えなかったものだけ（有効なら）LLM へ回す。
+  # ⚠ ports を付けないこと。ここが直接外から叩けると前段のレート制限を素通りされる。
+  chat-ai:
+    build: ${CHAT_SRC:-.}/apps/chat-ai
+    restart: unless-stopped
+    mem_limit: 256m
+    environment:
+      OLLAMA_URL: http://ollama:11434
+      CHAT_MODELS: ${CHAT_MODELS:-gemma3:1b,qwen2.5:1.5b}
+      CHAT_NUM_PREDICT: ${CHAT_NUM_PREDICT:-512}
+      CHAT_LLM_ENABLED: ${CHAT_LLM_ENABLED:-0}
+      # 設置ごとの追加処理。**既定は空**＝枠組みの処理（天気・調べ物・小噺）だけ。
+      # 空のあいだ、それを参照する意図は起動時に自動で外れる。
+      CHAT_SITE_HANDLERS: ${CHAT_SITE_HANDLERS:-}
+      # 外部（気象庁・Open-Meteo・Wikipedia）への名乗り。
+      # ⚠ 公開するなら必ず自分のものに書き換えること。
+      CHAT_USER_AGENT: ${CHAT_USER_AGENT:-}
+      # 天気と調べ物の情報源。既定は日本向け。日本の外へ配るときだけ触る。
+      WEATHER_SOURCE: ${WEATHER_SOURCE:-auto}
+      WIKIPEDIA_LANG: ${WIKIPEDIA_LANG:-ja}
+      # 中身（人格・回答・画面の文言・顔）の置き場所。
+      # 空＝イメージに同梱の content/（黒猫武将こてつ）。
+      # 自分のものにするなら .env に2行:
+      #     CHAT_CONTENT_HOST_DIR=./my-content   ← 手元のフォルダ
+      #     CHAT_CONTENT_DIR=/content            ← それを使う、という宣言
+      # 書き方は apps/chat-ai/content/README.md。見本は ../content-minimal/。
+      CHAT_CONTENT_DIR: ${CHAT_CONTENT_DIR:-}
+    volumes:
+      - ${CHAT_CONTENT_HOST_DIR:-../content-minimal}:/content:ro
+
+  # 推論エンジン。**既定では起動しない**（`--profile llm` を付けたときだけ）。
+  # LLM を使わないなら、イメージ約1.5GB もモデル約1.8GB も置かれない。
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["llm"]
+    restart: unless-stopped
+    mem_limit: ${OLLAMA_MEM_LIMIT:-4g}
+    cpus: ${OLLAMA_CPUS:-3.0}
+    environment:
+      OLLAMA_HOST: 0.0.0.0
+      OLLAMA_NUM_PARALLEL: "1"
+      OLLAMA_MAX_LOADED_MODELS: "1"
+      OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:-5m}
+    volumes:
+      # ⚠ 名前付きボリュームにすること。ホストの取り回し（rsync --delete 等）で
+      #   数GBのモデルが消えると、次の起動で黙って落とし直しになる。
+      - ollama_models:/root/.ollama
+
+volumes:
+  ollama_models:
