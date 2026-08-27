@@ -151,7 +151,7 @@ CHAT_USER_AGENT=my-site chat (+https://example.com/)   # ⚠ 必ず書き換え�
 
 ## 設定
 
-全項目と既定値は [`.env.example`](.env.example) にある。よく触るのはこのあたり。
+全項目と既定値は [`.env.example`](../.env.example) にある。よく触るのはこのあたり。
 
 | 項目 | 既定 | 何を決めるか |
 |---|---|---|
@@ -275,6 +275,6 @@ docker compose logs chat-ai | head -1            # 後段（起動ログの先�
 
 ## ライセンス
 
-コードは MIT（[`LICENSE`](../../LICENSE)）。
+コードは MIT（[`LICENSE`](../LICENSE)）。
 ⚠ **モデルの重みは別**。gemma3 は MIT ではなく Gemma 利用規約に従う。
-[`THIRD-PARTY.md`](../../THIRD-PARTY.md) を読むこと。
+[`THIRD-PARTY.md`](../THIRD-PARTY.md) を読むこと。

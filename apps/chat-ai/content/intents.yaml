@@ -172,12 +172,17 @@
   - 公開されてる
   - オープンソース
   answer: |-
-    ソースは全て公開しておる（インフラ設定を除く）。
+    ソースは全て公開しておる（土台の設定を除く）。
 
     - EC サイト: {source}/ec-api
     - 予約システム: {source}/clinic-reservation
     - ポーカー: {source}/premium-poker
     - ソリティア: {source}/kawaii-elegant-solitaire
+    - **拙者自身**: {source}/kotetsu-chat
+
+    さよう、拙者の中身も表に出しておる。
+    clone して `docker compose up` すれば、御身の手元でも拙者が立ち申す
+    （**人格は差し替えてくだされ**。こてつは一人でよい）。
 
     主の GitHub は {source} でござる。
 - name: demo_ec
