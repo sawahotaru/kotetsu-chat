@@ -45,6 +45,50 @@ services:
       # この口から LLM を使わせるか。既定 0＝規則で答えられることだけ答える。
       # ⚠ 利用者側からは変更できない（前段が自分の設定値で組み直して後段へ送る）。
       CHAT_ALLOW_LLM: ${CHAT_ALLOW_LLM:-0}
+      CHAT_ALLOW_CLIENT_PARAMS: ${CHAT_ALLOW_CLIENT_PARAMS:-0}
+    depends_on:
+      - chat-ai
+
+  # LINE の口（任意）。前段と**同じイメージ**を、環境変数だけ変えて起動する。
+  #
+  # 既定では起動しない。使うときだけ:
+  #   1. .env に LINE_CHANNEL_SECRET / LINE_CHANNEL_ACCESS_TOKEN を書く
+  #   2. docker compose --profile line up -d
+  #   3. リバースプロキシで webhook の経路を通す
+  #      ⚠ **プレフィックスを剥がさないこと**（/line/webhook がそのまま届くように）
+  #
+  # ⚠ ports を付けていない。webhook は外から届く必要があるので、
+  #   自分のリバースプロキシから /line/* だけを通すこと。
+  #   ⚠ /internal/push（Bot から話しかける口）は**絶対に外へ出さない**。
+  chat-gateway-line:
+    build: ${CHAT_SRC:-.}/apps/chat-gateway
+    profiles: ["line"]
+    restart: unless-stopped
+    mem_limit: 64m
+    environment:
+      CHAT_AI_URL: http://chat-ai:8000
+      # どちらの口か。⚠ .env からではなく**べた書き**。
+      #   秘密の有無でモードを決めると、書き忘れたとき web 側へ倒れ、
+      #   下の CHAT_ALLOW_LLM=1 と相まって匿名の LLM チャットとして起動してしまう。
+      CHAT_MODE: line
+      # 相手が特定できる口なので LLM を通してよい。Web 側は 0 のまま。
+      CHAT_ALLOW_LLM: ${LINE_ALLOW_LLM:-1}
+      # ⚠ `:?` を使わないこと。未設定時に docker compose の**全コマンド**が失敗する。
+      #   必須確認は前段（Go）が起動時に行い、このコンテナだけが止まる。
+      LINE_CHANNEL_SECRET: ${LINE_CHANNEL_SECRET-}
+      LINE_CHANNEL_ACCESS_TOKEN: ${LINE_CHANNEL_ACCESS_TOKEN-}
+      # webhook のパスに挟む秘密の一片（空なら /line/webhook）。
+      LINE_WEBHOOK_SLUG: ${LINE_WEBHOOK_SLUG-}
+      LINE_ALLOWED_GROUP_IDS: ${LINE_ALLOWED_GROUP_IDS-}
+      # 生成の持ち時間と、返信を諦める線（replyToken の寿命はおよそ60秒）。
+      LINE_REPLY_DEADLINE_SEC: ${LINE_REPLY_DEADLINE_SEC:-45}
+      LINE_TOKEN_SAFE_SEC: ${LINE_TOKEN_SAFE_SEC:-50}
+      LINE_QUEUE_SIZE: ${LINE_QUEUE_SIZE:-3}
+      # ⚠ IP ではなく groupId 単位で効く（webhook は LINE のサーバから来るため）。
+      LINE_RATE_PER_MIN: ${LINE_RATE_PER_MIN:-20}
+      LINE_RATE_BURST: ${LINE_RATE_BURST:-5}
+      # Bot から話しかける口。空なら生えない＝既定は無効。
+      LINE_PUSH_TOKEN: ${LINE_PUSH_TOKEN-}
     depends_on:
       - chat-ai
 
@@ -59,9 +103,21 @@ services:
       CHAT_MODELS: ${CHAT_MODELS:-gemma3:1b,qwen2.5:1.5b}
       CHAT_NUM_PREDICT: ${CHAT_NUM_PREDICT:-512}
       CHAT_LLM_ENABLED: ${CHAT_LLM_ENABLED:-0}
-      # 設置ごとの追加処理。**既定は空**＝枠組みの処理（天気・調べ物・小噺）だけ。
-      # 空のあいだ、それを参照する意図は起動時に自動で外れる。
-      CHAT_SITE_HANDLERS: ${CHAT_SITE_HANDLERS:-}
+      # ---- 処理（ハンドラ）。二つに分かれているのは意味の違いだけ ----
+      #
+      # ⚠ どちらも `:-` ではなく `-`（単一ダッシュ）。`:-` は**空文字も未設定と見なす**ので、
+      #   .env に CHAT_HANDLERS= と書いても既定へ戻り、外せなくなる。
+      #
+      # 同梱の処理。枠組みが常に持つのは小噺だけで、天気と調べ物は
+      # 他人のサービスに触るので外せるようにしてある（`CHAT_HANDLERS=` で全部外せる）。
+      # ⚠ 外したら**案内文も直すこと**。意図は起動時に自動で外れるが、
+      #   内容ファイルの案内文は静的なテキストなので残る。
+      #   「天気を聞かれよ」と促しておいて答えられぬ、が一番間の抜けた壊れ方。
+      CHAT_HANDLERS: ${CHAT_HANDLERS-weather,wikipedia}
+      # 設置ごとの追加処理。**既定は空**。内容ファイルの隣に .py を置いて名前で読む。
+      # ⚠ 同梱の処理と同じ名前を名乗ると起動時に止まる。差し替えるなら
+      #   先に CHAT_HANDLERS からその名前を外すこと。
+      CHAT_SITE_HANDLERS: ${CHAT_SITE_HANDLERS-}
       # 外部（気象庁・Open-Meteo・Wikipedia）への名乗り。
       # ⚠ 公開するなら必ず自分のものに書き換えること。
       CHAT_USER_AGENT: ${CHAT_USER_AGENT:-}

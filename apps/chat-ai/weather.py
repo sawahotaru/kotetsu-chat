@@ -316,3 +316,17 @@ async def answer(text: str) -> str:
         log.warning("天気の取得に失敗 place=%s: %s", place, e)
         src = "気象庁" if kind == "jp" else "Open-Meteo"
         return f"{place}の天気を{src}から取得できませんでした。時間をおいてお試しください。"
+
+
+def register() -> dict:
+    """この処理を名乗る（plugins.load_handlers から呼ばれる）。
+
+    ここに書いた名前が intents.yaml の `handler:` と対応する。
+
+    ⚠ 同梱してあるが**枠組みの一部ではない**。外の世界（気象庁 / Open-Meteo）に
+       触るものなので、要らない設置は CHAT_HANDLERS から外せる。
+       外すと、これを参照する意図は起動時に自動で落ちる。
+       ただし**案内文は静的なテキストなので残る**——外すなら内容ファイルも
+       一緒に差し替えること（さもないと「天気を聞かれよ」と促しておいて答えられない）。
+    """
+    return {"weather": answer}

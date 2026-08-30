@@ -287,3 +287,14 @@ def matches(text: str) -> bool:
     ここが lab_about や kotetsu を奪うことは無い。
     """
     return bool(extract_term(text))
+
+
+def register() -> dict:
+    """この処理を名乗る（plugins.load_handlers から呼ばれる）。
+
+    `matches` は `<名前>_matches` の綴りで登録する。intents.yaml の
+    `matcher: wikipedia` から引かれ、語の並びではなく自前の判定で拾える。
+
+    ⚠ 同梱してあるが**枠組みの一部ではない**（weather.register の注記を参照）。
+    """
+    return {"wikipedia": answer, "wikipedia_matches": matches}

@@ -31,9 +31,7 @@ from pydantic import BaseModel, Field
 
 import intents as intent_defs
 import settings
-import weather
-import wikipedia
-from plugins import load_site_handlers
+from plugins import load_handlers
 from router import Router
 
 log = logging.getLogger("chat-ai")
@@ -214,16 +212,17 @@ async def pull_all() -> None:
 
 # ---- 意図分類 ----
 
-# 枠組みが常に持つ処理。どの設置でも使える三つ（trivia は intents 側が持つ）。
-CORE_HANDLERS = {
-    "weather": weather.answer,
-    "wikipedia": wikipedia.answer,
-    "wikipedia_matches": wikipedia.matches,
-}
-
-# 設置ごとの追加（この lab なら店・予約システムへの問い合わせ）。
-# CHAT_SITE_HANDLERS で指定されたものだけ読む。無ければそれを参照する意図が自動で外れる。
-router = Router(intent_defs.build_intents({**CORE_HANDLERS, **load_site_handlers()}))
+# 処理の読み込みは **plugins.py に一本化**してある。
+#
+# 以前はここに CORE_HANDLERS（weather / wikipedia）を直に書き、設置ごとの追加だけを
+# 読み込んで後ろから重ねていた。そのため:
+#   - 同梱の処理を追加が**黙って上書き**できた（重複の検査を通らない）
+#   - 天気も調べ物も外せず、使わない設置にも他人のサービスへの依存が載り続けた
+# いまはどちらも同じ一覧に並ぶ。名前が衝突すれば止まる。
+#
+# 読み込まれなかった処理を参照する意図は build_intents() が起動時に外す
+# （記録に残る）ので、**減らしても起動する**。
+router = Router(intent_defs.build_intents(load_handlers()))
 
 
 @asynccontextmanager

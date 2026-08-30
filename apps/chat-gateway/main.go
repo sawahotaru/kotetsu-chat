@@ -43,7 +43,7 @@ var uiHTML []byte
 // 突き合わせは起動時に行わない。照らすには互いを呼ぶ必要があり、
 // 起動の順番に依存する脆い確認になるため。代わりに両方の /healthz に出しておき、
 // 食い違っていれば見て分かるようにしてある。
-const version = "0.1.3"
+const version = "0.3.0"
 
 var (
 	aiBase         = env("CHAT_AI_URL", "http://chat-ai:8000")
@@ -61,6 +61,17 @@ var (
 	// 「販売しておりません」と答えるような嘘が、そのまま lab の顔になる。
 	// 相手が特定できる口（LINE 等）は別のアダプタとして足し、そちらで true にする。
 	allowLLM = envBool("CHAT_ALLOW_LLM", false)
+
+	// どちらの口として起動するか。"line" で LINE の口になる。
+	//
+	// ⚠ **秘密（LINE_CHANNEL_SECRET）の有無でモードを決めてはいけない。**
+	//
+	//	秘密の不在が「別モードの合図」になると、「LINE のつもりなのに秘密が無い」を
+	//	異常として検出できなくなる。LINE 用のコンテナは CHAT_ALLOW_LLM=1 で動くので、
+	//	そこで web 側へ倒れると **/ と /api/chat を生やした LLM 有効の匿名チャット**
+	//	として起動してしまう。この分岐が防いでいるものが、設定漏れ1つで復活する。
+	//	だからモードは独立した変数で決め、compose 側にべた書きする。
+	lineMode = env("CHAT_MODE", "web") == "line"
 
 	// 利用者に system / temperature を決めさせるか。既定は **false**。
 	//
@@ -141,6 +152,9 @@ func validateConfig() {
 		log.Fatalf("設定エラー: CHAT_QUEUE_WAIT_SECONDS(%.0f秒) は CHAT_GEN_TIMEOUT_SECONDS(%.0f秒) より短くしてください"+
 			"（順番待ちだけで生成の持ち時間を使い切ってしまう）",
 			queueWait.Seconds(), genTimeout.Seconds())
+	}
+	if lineMode {
+		validateLineConfig() // 足りなければここで止まる（別モードへ倒れない）
 	}
 }
 
@@ -270,25 +284,48 @@ func main() {
 	go sweepBuckets()
 
 	mux := http.NewServeMux()
-	mux.HandleFunc("/", handleUI)
-	mux.HandleFunc("/api/models", handleModels)
-	// 画面に出す文言と顔は後段が持つ。前段は器のまま保ち、そのまま中継する。
-	// ここに埋め込むと、内容ファイルを差し替えても表題や名乗りが変わらなくなる。
-	mux.HandleFunc("/api/persona", proxyGet("/persona"))
-	mux.HandleFunc("/api/avatar", proxyGet("/avatar"))
-	mux.HandleFunc("/api/chat", handleChat)
-	// 生きているか、と、何の版か。版を出すのは、配った先で
+	// 生きているか、と、何の版か。どちらの口でも出す。版を出すのは、配った先で
 	// 「どれが動いているのか」を確かめる術が他に無いため
 	// （イメージのタグは付け替えられる）。
-	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		// client_params は画面が見る。効かない欄を見せないため（押しても無視される物を出さない）。
-		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q,\"client_params\":%t}\n", version, allowClientParams)
-	})
+	mux.HandleFunc("/healthz", handleHealthz)
+
+	if lineMode {
+		// LINE 専用のプロセス。**Web の口は生やさない。**
+		//
+		// ⚠ ここを分岐にせず「LINE の経路を足すだけ」にすると、同じイメージを使う以上
+		//	LINE 用プロセスも / と /api/chat を持つ。しかもこの口は CHAT_ALLOW_LLM=1。
+		//	つまり **匿名・無制限・LLM 有効のチャットAPI** が中で動いていて、
+		//	それを止めているのが Caddyfile の1行だけ、という状態になる。
+		//	守りを設定ファイルではなくコードに置くための分岐。
+		startLine()
+		mux.HandleFunc(lineWebhookRoute(), handleLineWebhook)
+		if linePushToken != "" {
+			// 発信の口。合言葉が無ければ**ルートごと生やさない**＝この設置には存在しない。
+			// ⚠ Caddy には通さないこと（docker ネットワーク内からのみ）。
+			mux.HandleFunc("/internal/push", handleInternalPush)
+		}
+	} else {
+		mux.HandleFunc("/", handleUI)
+		mux.HandleFunc("/api/models", handleModels)
+		// 画面に出す文言と顔は後段が持つ。前段は器のまま保ち、そのまま中継する。
+		// ここに埋め込むと、内容ファイルを差し替えても表題や名乗りが変わらなくなる。
+		mux.HandleFunc("/api/persona", proxyGet("/persona"))
+		mux.HandleFunc("/api/avatar", proxyGet("/avatar"))
+		mux.HandleFunc("/api/chat", handleChat)
+	}
 
 	addr := ":" + env("PORT", "8080")
-	log.Printf("chat-gateway %s 起動 addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v",
-		version, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams)
+	mode := "web"
+	if lineMode {
+		mode = "line"
+	}
+	log.Printf("chat-gateway %s 起動 口=%s addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v",
+		version, mode, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams)
+	if lineMode {
+		log.Printf("LINE: 経路=%s 締切=%.0f秒 諦め=%.0f秒 待ち行列=%d 発信の口=%v",
+			lineWebhookRoute(), lineReplyDeadline.Seconds(), lineTokenSafe.Seconds(),
+			lineQueueSize, linePushToken != "")
+	}
 	srv := &http.Server{
 		Addr:        addr,
 		Handler:     mux,
@@ -298,6 +335,12 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 	log.Fatal(srv.ListenAndServe())
+}
+
+func handleHealthz(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json")
+	// client_params は画面が見る。効かない欄を見せないため（押しても無視される物を出さない）。
+	fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q,\"client_params\":%t}\n", version, allowClientParams)
 }
 
 func handleUI(w http.ResponseWriter, r *http.Request) {
