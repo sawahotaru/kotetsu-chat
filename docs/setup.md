@@ -27,7 +27,7 @@ docker compose up -d --build
 理由は無い（平気で嘘をつく）。
 
 そのため **既定では LLM を使わない**。ollama も起動しない
-（イメージ約1.5GB もモデル約1.8GB も置かれない）。
+（イメージ **約7GB** もモデル約1.8GB も置かれない）。
 規則だけで動かすなら、必要なのは **RAM 320MB 程度**とディスク数百MB。
 
 ### 中身と枠組みが分かれている
@@ -164,7 +164,7 @@ CHAT_USER_AGENT=my-site chat (+https://example.com/)   # ⚠ 必ず書き換え�
 | `CHAT_MAX_HISTORY` | `8` | 後段へ送る往復数 |
 | `CHAT_LLM_ENABLED` | `0` | 後段が LLM を使える状態か |
 | `CHAT_ALLOW_LLM` | `0` | この口から LLM を使わせるか |
-| `CHAT_MODELS` | `gemma3:1b,qwen2.5:1.5b` | 使ってよいモデル（許可リスト）。先頭が既定 |
+| `CHAT_MODELS` | `qwen2.5:3b,gemma3:1b` | 使ってよいモデル（許可リスト）。先頭が既定。3B なのは口調を保てるため（⚠ 常駐前提） |
 
 真偽の項目は `1/0` のほか `true/false`・`yes/no`・`on/off` も使える
 （前段・後段で解釈は揃えてある）。

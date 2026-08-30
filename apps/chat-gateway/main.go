@@ -43,7 +43,7 @@ var uiHTML []byte
 // 突き合わせは起動時に行わない。照らすには互いを呼ぶ必要があり、
 // 起動の順番に依存する脆い確認になるため。代わりに両方の /healthz に出しておき、
 // 食い違っていれば見て分かるようにしてある。
-const version = "0.3.0"
+const version = "0.3.3"
 
 var (
 	aiBase         = env("CHAT_AI_URL", "http://chat-ai:8000")
