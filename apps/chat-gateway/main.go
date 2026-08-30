@@ -43,7 +43,7 @@ var uiHTML []byte
 // 突き合わせは起動時に行わない。照らすには互いを呼ぶ必要があり、
 // 起動の順番に依存する脆い確認になるため。代わりに両方の /healthz に出しておき、
 // 食い違っていれば見て分かるようにしてある。
-const version = "0.1.2"
+const version = "0.1.3"
 
 var (
 	aiBase         = env("CHAT_AI_URL", "http://chat-ai:8000")
@@ -61,6 +61,20 @@ var (
 	// 「販売しておりません」と答えるような嘘が、そのまま lab の顔になる。
 	// 相手が特定できる口（LINE 等）は別のアダプタとして足し、そちらで true にする。
 	allowLLM = envBool("CHAT_ALLOW_LLM", false)
+
+	// 利用者に system / temperature を決めさせるか。既定は **false**。
+	//
+	// ⚠ これを true にすると、**匿名の利用者が人格定義を丸ごと差し替えられる**。
+	//
+	//	後段は system が空でなければ既定を捨てて採用する
+	//	（app.py の `system = req.system.strip() or DEFAULT_SYSTEM`）。
+	//	つまり 2000 文字ぶんの指示を外から差し込めるということで、
+	//	公開している展示物なら「こてつに何でも言わせて画面を撮る」が成立する。
+	//	画面側は LLM 無効時にこの欄を隠すが、**隠れているのは画面だけで API は受け付ける**。
+	//	守りを画面に置いてはならない。
+	//
+	// 手元でモデルの振る舞いを試すときだけ 1 にする（配る物なので口は残す）。
+	allowClientParams = envBool("CHAT_ALLOW_CLIENT_PARAMS", false)
 )
 
 func env(k, def string) string {
@@ -227,6 +241,12 @@ type message struct {
 
 // chatRequest はブラウザから受け取る形。
 // ⚠ ここに allow_llm を持たせてはいけない。持たせると利用者が自分で true にできてしまう。
+//
+// ⚠ System / Temperature は受け取るが、**そのまま後段へ渡してはいけない**。
+//
+//	CHAT_ALLOW_CLIENT_PARAMS が false（既定）なら handleChat が空に落とす。
+//	項目自体を消さないのは、手元で試すときに口を残しておくため。
+//	どちらも omitempty なので、空にすれば後段の JSON からは消え、後段の既定が効く。
 type chatRequest struct {
 	Model       string    `json:"model"`
 	Messages    []message `json:"messages"`
@@ -262,12 +282,13 @@ func main() {
 	// （イメージのタグは付け替えられる）。
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q}\n", version)
+		// client_params は画面が見る。効かない欄を見せないため（押しても無視される物を出さない）。
+		fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q,\"client_params\":%t}\n", version, allowClientParams)
 	})
 
 	addr := ":" + env("PORT", "8080")
-	log.Printf("chat-gateway %s 起動 addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v",
-		version, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM)
+	log.Printf("chat-gateway %s 起動 addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v",
+		version, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams)
 	srv := &http.Server{
 		Addr:        addr,
 		Handler:     mux,
@@ -355,6 +376,17 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusBadRequest, "リクエストの形式が正しくありません")
 		return
 	}
+
+	// 利用者に決めさせない項目を、後段へ渡る前にここで落とす。
+	//
+	// ⚠ エラーにはしない。**黙って捨てる**。
+	//	画面は temperature を常に送っている（欄が隠れていてもスライダの既定値 0.7 が乗る）。
+	//	弾く作りにすると、公開版の会話が丸ごと 400 になる。
+	if !allowClientParams {
+		req.System = ""
+		req.Temperature = nil
+	}
+
 	if err := validate(&req); err != nil {
 		writeJSONError(w, http.StatusBadRequest, err.Error())
 		return

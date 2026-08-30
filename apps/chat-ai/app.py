@@ -504,7 +504,14 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     if not llm_available:
         # 「分かりません」で終わらせず、答えられることを示す。
         # 何を聞けばよいか分からないまま帰らせるのが、この手のボットの一番の失敗。
-        log.info("ルートで拾えず（LLM無効）: %s", last_user[:60])
+        #
+        # ⚠ ここに利用者の文面を出さないこと。
+        #   以前は last_user[:60] を出していた。この枝は llm_available が偽のとき——
+        #   つまり **公開している Web の口では毎回** 通る。しかも通るのは
+        #   「規則で拾えなかった問い」＝最も踏み込んだ、その人固有の質問だけ。
+        #   一方この chat-ai は、聞かれれば「会話は残さぬ」と答える。破ってはならぬ。
+        #   閾値の調整には、拾えたか否かと score（上の「照合」）だけで足りる。
+        log.info("ルートで拾えず（LLM無効）")
         return StreamingResponse(
             respond_with_text(intent_defs.UNKNOWN, route="none"),
             media_type="application/x-ndjson",

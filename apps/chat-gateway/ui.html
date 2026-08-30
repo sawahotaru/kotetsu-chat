@@ -149,7 +149,7 @@
   <label>モデル
     <select id="model"><option value="">読み込み中…</option></select>
   </label>
-  <label>temperature
+  <label id="tempLabel">temperature
     <input type="range" id="temp" min="0" max="1.5" step="0.1" value="0.7">
     <span id="tempVal" style="color:var(--text);min-width:1.9rem">0.7</span>
   </label>
@@ -441,6 +441,18 @@
       // 「何でも答える AI」だと誤解させないためにも、素直に規則ボットだと名乗る。
       llmEnabled = data.llm_enabled !== false;
       $("llmSettings").hidden = !llmEnabled;
+
+      // temperature とシステムプロンプトは、設置側が許していなければ**前段が捨てる**。
+      // 捨てられる欄を出しておくと「動かしたのに効かない」になる。器のほうを畳む。
+      // ⚠ 守りはここではなく前段（CHAT_ALLOW_CLIENT_PARAMS）。これは見た目を合わせるだけ。
+      try {
+        const hz = await (await fetch("healthz")).json();
+        if (hz.client_params === false) {
+          $("tempLabel").hidden = true;
+          $("sysToggle").hidden = true;
+          $("systemWrap").style.display = "none";
+        }
+      } catch (_) { /* 取れなければ欄はそのまま。送っても捨てられるだけで害はない */ }
       // 文言は内容ファイル側が持つ（案内役の言葉なので人格に合わせる）。
       // 書かれていない設置のために、中立の既定だけここに残す。
       $("modeLabel").innerHTML = personaModeLabel || (llmEnabled
@@ -650,12 +662,27 @@
     updateSendState();
   });
 
+  // IME（日本語入力）の変換確定 Enter を送信と誤認しないための状態。
+  // Safari は「変換確定」の keydown が compositionend の *後* に来て
+  // e.isComposing が false になっているため、isComposing だけでは弾けない。
+  // そこで自前フラグ＋compositionend 直後の猶予時間でも判定する。
+  let imeComposing = false;
+  let imeEndedAt = -Infinity;
+  const IME_GRACE_MS = 100;  // 人間の連続打鍵(>150ms)より十分短い
+
+  input.addEventListener("compositionstart", () => { imeComposing = true; });
+  input.addEventListener("compositionend", (e) => {
+    imeComposing = false;
+    imeEndedAt = e.timeStamp;
+  });
+
   input.addEventListener("keydown", (e) => {
-    // IME 変換中の Enter は送信しない
-    if (e.key === "Enter" && !e.shiftKey && !e.isComposing) {
-      e.preventDefault();
-      form.requestSubmit();
-    }
+    if (e.key !== "Enter" || e.shiftKey) return;
+    // 変換中・確定直後の Enter は送信しない（keyCode 229 は IME 処理中の慣例値）
+    if (e.isComposing || imeComposing || e.keyCode === 229) return;
+    if (e.timeStamp - imeEndedAt < IME_GRACE_MS) return;  // Safari の確定 Enter
+    e.preventDefault();
+    form.requestSubmit();
   });
 
   temp.addEventListener("input", () => { tempVal.textContent = temp.value; });
