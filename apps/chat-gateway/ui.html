@@ -92,8 +92,12 @@
   }
   .msg th,.msg td{border:1px solid var(--line); padding:.32rem .6rem; text-align:left}
   .msg th{background:var(--panel2); font-weight:700}
-  .notice{align-self:center; font-size:.8rem; color:var(--muted); text-align:center; max-width:34rem}
+  .notice{align-self:center; font-size:.8rem; color:var(--muted); text-align:center; max-width:34rem;
+          transition:opacity .4s ease}
   .notice.error{color:var(--err)}
+  /* 役目を終えた報せ（クリア確認など）を静かに引き取るため。
+     消える瞬間に文字が跳ねないよう、高さは残さず opacity だけで送る。 */
+  .notice.fading{opacity:0}
   .cursor::after{content:"▋"; animation:blink 1s steps(2) infinite; color:var(--accent)}
   @keyframes blink{50%{opacity:0}}
   .intro{align-self:center; text-align:center; color:var(--muted); max-width:34rem; margin-top:1.6rem}
@@ -146,6 +150,13 @@
 </header>
 
 <div class="settings" id="llmSettings" hidden>
+  <label id="answerModeLabel">答え方
+    <select id="answerMode">
+      <option value="auto">規則を優先（拾えなければ LLM）</option>
+      <option value="llm">LLM だけで答える</option>
+      <option value="rules">規則だけで答える</option>
+    </select>
+  </label>
   <label>モデル
     <select id="model"><option value="">読み込み中…</option></select>
   </label>
@@ -197,6 +208,7 @@
   const $ = (id) => document.getElementById(id);
   const log = $("log"), input = $("input"), form = $("form"), sendBtn = $("send");
   const modelSel = $("model"), temp = $("temp"), tempVal = $("tempVal");
+  const answerModeSel = $("answerMode");
   const systemBox = $("system"), counter = $("counter");
 
   // {role, content} の並び。**この端末のブラウザの中だけに存在する**。
@@ -346,13 +358,28 @@
     return el;
   }
 
-  function addNotice(text, isError) {
+  // ttlMs を渡すと、その時間だけ出てから静かに消える。
+  //
+  // 既定（ttlMs なし）は出しっぱなし。推論エンジンの不調やモデル取得中のように
+  // 「状況が続いている」報せは、消えると利用者が理由を見失うため残す。
+  // 一方クリア確認のような**行為への返事**は、残すと次の会話の頭に居座り続ける。
+  // その区別をここで付ける。
+  const NOTICE_TTL_MS = 6000;
+
+  function addNotice(text, isError, ttlMs) {
     // 案内は畳まない。起動直後のお知らせだけで名乗りが消えてしまうため。
     const el = document.createElement("div");
     el.className = "notice" + (isError ? " error" : "");
     el.textContent = text;
     log.appendChild(el);
     scrollToEnd();
+    if (ttlMs) {
+      setTimeout(() => {
+        el.classList.add("fading");
+        // transition の .4s を待ってから取り除く。既に消えていても remove() は無害。
+        setTimeout(() => el.remove(), 400);
+      }, ttlMs);
+    }
     return el;
   }
 
@@ -452,7 +479,14 @@
           $("sysToggle").hidden = true;
           $("systemWrap").style.display = "none";
         }
-      } catch (_) { /* 取れなければ欄はそのまま。送っても捨てられるだけで害はない */ }
+        // 答え方を選ばせない口では、欄ごと出さない。
+        // ⚠ 選ばせない設置でも**設置側が選んだ答え方は効いている**。
+        //   欄が無いのは「選べない」であって「機能が無い」ではない。
+        if (hz.client_mode === false) {
+          $("answerModeLabel").hidden = true;
+          if (hz.answer_mode) answerModeSel.value = hz.answer_mode;
+        }
+      } catch (_) { /* 取れなければ欄はそのまま。送っても設置側の設定で上書きされる */ }
       // 文言は内容ファイル側が持つ（案内役の言葉なので人格に合わせる）。
       // 書かれていない設置のために、中立の既定だけここに残す。
       $("modeLabel").innerHTML = personaModeLabel || (llmEnabled
@@ -547,6 +581,8 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           model: modelSel.value,
+          // 答え方は**利用者の明示的な選択**。こちらの推測で決めない。
+          answer_mode: answerModeSel.value,
           messages: history,
           temperature: parseFloat(temp.value),
           system: systemBox.value.trim(),
@@ -706,7 +742,9 @@
     // 案内は残す。log.innerHTML="" だと案内ごと消え、質問例へ戻れなくなる。
     for (const el of [...log.querySelectorAll(".msg, .notice")]) el.remove();
     showIntro();
-    addNotice(L("cleared", "会話をクリアしました。この端末に残していた分も消えました。"));
+    // 行為への返事なので時間で引き取る。画面は既に名乗りへ戻っており、
+    // 残し続けると次の会話の先頭に無関係な一行が居座る。
+    addNotice(L("cleared", "会話をクリアしました。この端末に残していた分も消えました。"), false, NOTICE_TTL_MS);
   });
 
   // 質問例。何を聞けばよいか分からない人が最初の一手を踏み出せるように。

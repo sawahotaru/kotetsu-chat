@@ -284,3 +284,95 @@ def test_no_slot_is_left_unresolved(llm):
         if not it.answer:
             continue
         assert "〔LLM" not in intent_defs.apply_llm_notes(it.answer, llm), it.name
+
+
+# ---- 規則と LLM の混ざり方（app.chat の分岐） ----
+#
+# 以前は「2往復目からは規則を飛ばす」だったため、こうなっていた:
+#   1往復目「東京の天気は？」 → 気象庁を引いて答える
+#   2往復目「東京の天気は？」 → LLM が「分からんでござる」と作り話をする
+# 同じ問いが、会話が始まっているだけで当てにならなくなる。
+#
+# いまは **処理を持つ意図なら往復数に関わらず規則が勝つ**。
+# 天気・在庫・空きはモデルの知りようのない事実なので、任せてはいけない。
+
+def _use_rule(intent, first_turn, llm_available, score=1.0, threshold=0.5):
+    """app.chat の判定と同じ式。ここが本体とずれたら試験の意味が無くなる。"""
+    return intent is not None and (
+        first_turn
+        or not llm_available
+        or (intent.handler is not None and score >= threshold)
+    )
+
+
+class _Intent:
+    def __init__(self, handler):
+        self.handler = handler
+
+
+_WITH_HANDLER = _Intent(handler=lambda text: "天気でござる")   # 天気・在庫・空き
+_STATIC_ONLY = _Intent(handler=None)                          # 決め打ちの答えだけ
+
+
+def test_handler_intent_wins_even_mid_conversation():
+    """処理を持つ意図は、会話の途中でも規則が勝つこと。
+
+    ここが偽になると「2往復目の天気」で LLM が作り話をする。
+    """
+    assert _use_rule(_WITH_HANDLER, first_turn=False, llm_available=True)
+
+
+def test_static_intent_does_not_interrupt_mid_conversation():
+    """決め打ちの答えしか持たない意図は、会話の途中では割り込まないこと。
+
+    「じゃあ大阪は？」のような続きを単発の問いと誤読させないための線引き。
+    """
+    assert not _use_rule(_STATIC_ONLY, first_turn=False, llm_available=True)
+
+
+def test_first_turn_always_routes():
+    """1往復目は従来どおり、どちらの意図でも規則を試すこと。"""
+    assert _use_rule(_STATIC_ONLY, first_turn=True, llm_available=True)
+    assert _use_rule(_WITH_HANDLER, first_turn=True, llm_available=True)
+
+
+def test_without_llm_everything_routes():
+    """LLM が無い設置では、渡す先が無いので常に規則を試すこと。
+
+    公開している Web の口はこの経路。ここが崩れると公開版が黙る。
+    """
+    assert _use_rule(_STATIC_ONLY, first_turn=False, llm_available=False)
+    assert _use_rule(_WITH_HANDLER, first_turn=False, llm_available=False)
+
+
+def test_no_intent_never_routes():
+    """意図が当たらなければ規則は使えない（LLM へ落ちる）。"""
+    assert not _use_rule(None, first_turn=True, llm_available=True)
+    assert not _use_rule(None, first_turn=False, llm_available=False)
+
+
+def test_weak_match_does_not_interrupt_mid_conversation():
+    """会話の途中では、**確信の薄い当たりで規則が割り込まない**こと。
+
+    実測（同梱の内容ファイル）:
+      割り込むべき  weather 0.69 / product_search 0.74 / trivia 1.12 … 最小 0.57
+      任せるべき    wikipedia の誤爆 0.38〜0.39            … 最大 0.39
+
+    ここが無いと「日本の四季について」が wikipedia に 0.39 で当たり、
+    語を切り出せぬまま「はて、何について調べれば」と会話を止める。
+    """
+    assert not _use_rule(_WITH_HANDLER, first_turn=False, llm_available=True, score=0.39)
+    assert _use_rule(_WITH_HANDLER, first_turn=False, llm_available=True, score=0.57)
+
+
+def test_threshold_does_not_apply_on_the_first_turn():
+    """1往復目には効かないこと（従来どおり router の閾値だけで決まる）。"""
+    assert _use_rule(_WITH_HANDLER, first_turn=True, llm_available=True, score=0.35)
+
+
+def test_threshold_does_not_apply_without_llm():
+    """LLM が無い設置では、渡す先が無いので確信が薄くても規則で拾うこと。
+
+    公開版がここ。ここが崩れると、拾えたはずの問いまで「心得の外」になる。
+    """
+    assert _use_rule(_WITH_HANDLER, first_turn=False, llm_available=False, score=0.35)

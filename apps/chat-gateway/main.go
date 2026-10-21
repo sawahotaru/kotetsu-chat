@@ -43,7 +43,7 @@ var uiHTML []byte
 // 突き合わせは起動時に行わない。照らすには互いを呼ぶ必要があり、
 // 起動の順番に依存する脆い確認になるため。代わりに両方の /healthz に出しておき、
 // 食い違っていれば見て分かるようにしてある。
-const version = "0.3.3"
+const version = "0.4.0"
 
 var (
 	aiBase         = env("CHAT_AI_URL", "http://chat-ai:8000")
@@ -86,6 +86,19 @@ var (
 	//
 	// 手元でモデルの振る舞いを試すときだけ 1 にする（配る物なので口は残す）。
 	allowClientParams = envBool("CHAT_ALLOW_CLIENT_PARAMS", false)
+
+	// 利用者に「答え方」を選ばせるか。既定は **false**＝設置側が決める。
+	//
+	// ⚠ これは allow_llm（権限）とは別のもの。権限の**中**で誰が選ぶか、という話。
+	//
+	//	口ごとに違ってよい:
+	//	  公開 Web   … false。訪ねてきた人に「答え方」を選ばせても意味が分からない
+	//	  手元の dev … true。見比べるための口なので選ばせる
+	//	  LINE       … false。代わりに投稿の頭の字で指定させる（LINE_PREFIXES）
+	allowClientMode = envBool("CHAT_ALLOW_CLIENT_MODE", false)
+
+	// 設置側が決める答え方。allowClientMode が false のときはこれで固定する。
+	defaultAnswerMode = normalizeAnswerMode(env("CHAT_ANSWER_MODE", "auto"))
 )
 
 func env(k, def string) string {
@@ -266,6 +279,23 @@ type chatRequest struct {
 	Messages    []message `json:"messages"`
 	Temperature *float64  `json:"temperature,omitempty"`
 	System      string    `json:"system,omitempty"`
+
+	// 答え方。画面の「答え方」の選択がこれを送る。
+	//
+	//	auto  … 規則で拾えたら規則、拾えなければ LLM（既定）
+	//	llm   … 常に LLM
+	//	rules … 常に規則
+	//
+	// ⚠ これは allow_llm と違い、**受け取ってよい**。
+	//
+	//	allow_llm は「この口で LLM を使ってよいか」という**権限**で、設置側が握る。
+	//	こちらは「その権限の中で今回どう答えさせるか」でしかない。
+	//	閉じてある口（allow_llm=false）に "llm" を指定しても LLM は動かない。
+	//
+	// なぜ選ばせるか: 以前は「1往復目か」「score がいくつか」という**こちらの推測**で
+	// 経路が決まっていた。使う側から見ると、同じ問いが場面によって規則にも LLM にも
+	// なり、しかもなぜそうなったか分からない。選べるほうが筋が通る。
+	AnswerMode string `json:"answer_mode,omitempty"`
 }
 
 // upstreamRequest は後段へ送る形。
@@ -275,6 +305,21 @@ type chatRequest struct {
 type upstreamRequest struct {
 	chatRequest
 	AllowLLM bool `json:"allow_llm"`
+}
+
+// 画面から受け取ってよい「答え方」。ここに無い綴りは既定へ落とす。
+//
+// ⚠ 素通しにしないのは、後段の Literal 検証で 422 になるのを前段で防ぐため。
+//
+//	利用者の打ち間違いや古い画面が、会話そのものを失敗させるべきではない。
+var answerModes = map[string]bool{"auto": true, "llm": true, "rules": true}
+
+// normalizeAnswerMode は受け取った綴りを検める。知らない値は "auto" にする。
+func normalizeAnswerMode(v string) string {
+	if answerModes[v] {
+		return v
+	}
+	return "auto"
 }
 
 func main() {
@@ -309,7 +354,7 @@ func main() {
 		mux.HandleFunc("/api/models", handleModels)
 		// 画面に出す文言と顔は後段が持つ。前段は器のまま保ち、そのまま中継する。
 		// ここに埋め込むと、内容ファイルを差し替えても表題や名乗りが変わらなくなる。
-		mux.HandleFunc("/api/persona", proxyGet("/persona"))
+		mux.HandleFunc("/api/persona", proxyGet("/persona"+allowLLMQuery()))
 		mux.HandleFunc("/api/avatar", proxyGet("/avatar"))
 		mux.HandleFunc("/api/chat", handleChat)
 	}
@@ -319,8 +364,8 @@ func main() {
 	if lineMode {
 		mode = "line"
 	}
-	log.Printf("chat-gateway %s 起動 口=%s addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v",
-		version, mode, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams)
+	log.Printf("chat-gateway %s 起動 口=%s addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v 答え方=%s(選択%v)",
+		version, mode, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams, defaultAnswerMode, allowClientMode)
 	if lineMode {
 		log.Printf("LINE: 経路=%s 締切=%.0f秒 諦め=%.0f秒 待ち行列=%d 発信の口=%v",
 			lineWebhookRoute(), lineReplyDeadline.Seconds(), lineTokenSafe.Seconds(),
@@ -340,7 +385,9 @@ func main() {
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// client_params は画面が見る。効かない欄を見せないため（押しても無視される物を出さない）。
-	fmt.Fprintf(w, "{\"status\":\"ok\",\"version\":%q,\"client_params\":%t}\n", version, allowClientParams)
+	fmt.Fprintf(w,
+		"{\"status\":\"ok\",\"version\":%q,\"client_params\":%t,\"client_mode\":%t,\"answer_mode\":%q}\n",
+		version, allowClientParams, allowClientMode, defaultAnswerMode)
 }
 
 func handleUI(w http.ResponseWriter, r *http.Request) {
@@ -358,6 +405,21 @@ func handleUI(w http.ResponseWriter, r *http.Request) {
 //
 // 中身には触らない。触れば「後段が持っている」という前提が崩れ、
 // 内容ファイルを差し替えても前段の細工が残ってしまう。
+// allowLLMQuery は「この口が LLM を使うか」を後段への問い合わせに添える。
+//
+// ⚠ 後段(chat-ai)は口ごとの設定を知らない。LLM を使うかは口ごとに違い（Web=0 / dev,LINE=1）、
+//
+//	それを知っているのはこの前段だけ。添えずに聞くと、後段は自分の CHAT_LLM_ENABLED
+//	だけで答えるため、**LLM を使わない Web の口でも画面が「＋LLM」と名乗り、
+//	モデル選択欄まで出る**（そして答えは必ず規則から返る＝切り替わらない）。
+//	文言と一覧の確定は後段に置いたままにしたいので、判断材料だけをここから渡す。
+func allowLLMQuery() string {
+	if allowLLM {
+		return "?allow_llm=1"
+	}
+	return "?allow_llm=0"
+}
+
 func proxyGet(path string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
@@ -391,7 +453,7 @@ func handleModels(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 15*time.Second)
 	defer cancel()
 
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, aiBase+"/models", nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, aiBase+"/models"+allowLLMQuery(), nil)
 	if err != nil {
 		writeJSONError(w, http.StatusInternalServerError, "リクエストを作れませんでした")
 		return
@@ -503,6 +565,14 @@ func validate(req *chatRequest) error {
 func stream(w http.ResponseWriter, flusher http.Flusher, r *http.Request, req *chatRequest) {
 	ctx, cancel := context.WithTimeout(r.Context(), genTimeout)
 	defer cancel()
+
+	// ⚠ 権限（allow_llm）は設置側の設定そのまま。
+	//   答え方を利用者に選ばせるかどうかも、口ごとの設定で決まる。
+	if allowClientMode {
+		req.AnswerMode = normalizeAnswerMode(req.AnswerMode)
+	} else {
+		req.AnswerMode = defaultAnswerMode
+	}
 
 	body, err := json.Marshal(upstreamRequest{chatRequest: *req, AllowLLM: allowLLM})
 	if err != nil {

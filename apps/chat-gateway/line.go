@@ -55,6 +55,18 @@ var (
 
 	// 発信の口（§3.14）。空ならルートごと生えない＝この設置には発信機能が無い。
 	linePushToken = os.Getenv("LINE_PUSH_TOKEN")
+
+	// 投稿の頭に付けて答え方やモデルを指定させる字。空なら指定できない。
+	//
+	//	LINE_PREFIXES="規=@rules,低=gemma3:1b,中=qwen2.5:1.5b,高=qwen2.5:3b"
+	//
+	//	「規 東京の天気は？」→ 規則だけで答える
+	//	「低 むかし話をして」→ 小さいモデルで答える
+	//
+	// ⚠ 画面が無い口なので、選ばせるにはこれしか手が無い。
+	//	値が `@rules` `@llm` `@auto` なら答え方、それ以外はモデル名として扱う。
+	//	モデル名は後段の許可リストで検められるので、ここでは中身を問わない。
+	linePrefixes = parseLinePrefixes(os.Getenv("LINE_PREFIXES"))
 )
 
 const (
@@ -276,6 +288,8 @@ type lineWebhookBody struct {
 type lineJob struct {
 	replyToken string
 	question   string
+	mode       string    // 投稿の頭で指定された答え方（空なら設置側の既定）
+	model      string    // 同上。モデル名
 	at         time.Time // イベントを受け取った時刻。締切はここから数える
 }
 
@@ -331,12 +345,14 @@ func handleLineWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 
 	for _, ev := range hook.Events {
-		q, ok := lineAccept(ev)
+		q, mode, model, ok := lineAccept(ev)
 		if !ok {
 			continue
 		}
 		select {
-		case lineJobs <- lineJob{replyToken: ev.ReplyToken, question: q, at: time.Now()}:
+		case lineJobs <- lineJob{
+			replyToken: ev.ReplyToken, question: q, mode: mode, model: model, at: time.Now(),
+		}:
 		default:
 			// 満杯。replyToken を「混雑のお知らせ」に使い切る。
 			// 期限切れさせるより、無料・即時・正直。
@@ -352,9 +368,9 @@ func handleLineWebhook(w http.ResponseWriter, r *http.Request) {
 
 // lineAccept は「答えるべきイベントか」を判じ、答えるなら質問文を返す。
 // 条件を満たさないものは**黙って捨てる**（エラー返信をしない）。
-func lineAccept(ev lineEvent) (string, bool) {
+func lineAccept(ev lineEvent) (q, mode, model string, ok bool) {
 	if ev.Type != "message" || ev.Message.Type != "text" || ev.ReplyToken == "" {
-		return "", false
+		return "", "", "", false
 	}
 	// グループ（と複数人トーク）だけ。1対1は今回のスコープ外。
 	src := ev.Source.GroupID
@@ -362,19 +378,19 @@ func lineAccept(ev lineEvent) (string, bool) {
 		src = ev.Source.RoomID
 	}
 	if ev.Source.Type != "group" && ev.Source.Type != "room" {
-		return "", false
+		return "", "", "", false
 	}
 	if src == "" {
-		return "", false
+		return "", "", "", false
 	}
 	if len(lineAllowedGroups) > 0 && !contains(lineAllowedGroups, src) {
-		return "", false
+		return "", "", "", false
 	}
 
 	// 名指しされたときだけ答える。
 	// ⚠ @all には反応しない（グループ全体宛てに割り込むため）。
 	if ev.Message.Mention == nil {
-		return "", false
+		return "", "", "", false
 	}
 	named := false
 	for _, m := range ev.Message.Mention.Mentionees {
@@ -386,23 +402,25 @@ func lineAccept(ev lineEvent) (string, bool) {
 		}
 	}
 	if !named {
-		return "", false
+		return "", "", "", false
 	}
 
 	if lineSeenBefore(ev.WebhookEventID) {
 		lineCountDup.Add(1)
-		return "", false
+		return "", "", "", false
 	}
 	if !lineLimiter.allow(src) {
 		// 毎回「制限中です」と返すと、それ自体が騒がしい。黙って捨てる。
-		return "", false
+		return "", "", "", false
 	}
 
-	q := stripMentions(ev.Message.Text, ev.Message.Mention.Mentionees)
+	q = stripMentions(ev.Message.Text, ev.Message.Mention.Mentionees)
 	if q == "" {
-		return msgUsage, true // 呼ばれただけ。使い方を返す
+		return msgUsage, "", "", true // 呼ばれただけ。使い方を返す
 	}
-	return q, true
+	// 画面が無い口なので、頭の一字で答え方やモデルを指定させる。
+	mode, model, q = takeLinePrefix(q)
+	return q, mode, model, true
 }
 
 func contains(list []string, v string) bool {
@@ -443,6 +461,53 @@ func stripMentions(text string, ms []lineMentionee) string {
 	return strings.TrimSpace(string(utf16.Decode(u)))
 }
 
+// parseLinePrefixes は "字=値,字=値" を読む。壊れた並びは黙って飛ばす
+// （投稿を捌く口なので、設定の綴り違いで会話ごと止めない）。
+func parseLinePrefixes(raw string) map[string]string {
+	out := map[string]string{}
+	for _, pair := range strings.Split(raw, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(pair), "=")
+		k, v = strings.TrimSpace(k), strings.TrimSpace(v)
+		if ok && k != "" && v != "" {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// takeLinePrefix は本文の頭にある指定の字を取り除き、何を指定されたかを返す。
+//
+// 返すのは (答え方, モデル, 残りの本文)。指定が無ければ答え方もモデルも空。
+//
+// ⚠ 頭の一語だけを見る。文中の「規」などに反応してはいけない。
+// ⚠ 指定を取り除いた結果が空になるなら、それは指定ではなく本文とみなす
+//
+//	（「規」とだけ投稿されたら、それは質問のつもりであろう）。
+func takeLinePrefix(text string) (mode, model, rest string) {
+	if len(linePrefixes) == 0 {
+		return "", "", text
+	}
+	head, tail, ok := strings.Cut(strings.TrimSpace(text), " ")
+	if !ok {
+		// 全角の空白で区切る人も居る。
+		head, tail, ok = strings.Cut(strings.TrimSpace(text), "　")
+	}
+	if !ok {
+		return "", "", text
+	}
+	v, found := linePrefixes[head]
+	tail = strings.TrimSpace(tail)
+	if !found || tail == "" {
+		return "", "", text
+	}
+	switch v {
+	case "@rules", "@llm", "@auto":
+		return strings.TrimPrefix(v, "@"), "", tail
+	default:
+		return "", v, tail
+	}
+}
+
 // ---- ワーカー ----
 
 // recoverLine は panic でプロセスごと落ちるのを防ぐ。
@@ -481,7 +546,7 @@ func runLineJob(job lineJob) {
 	}
 
 	// 生成に与える持ち時間は「45秒」ではなく **45秒 − 待たされた時間**。
-	text, route, truncated, err := askChatAI(job.question, lineReplyDeadline-elapsed)
+	text, route, truncated, err := askChatAI(job, lineReplyDeadline-elapsed)
 	if err != nil {
 		log.Printf("LINE: 後段への問い合わせに失敗した: %v", err)
 	}
@@ -494,23 +559,35 @@ func runLineJob(job lineJob) {
 	}
 	lineReply(job.replyToken, text)
 	lineCountReply.Add(1)
-	log.Printf("LINE: 応答 route=%s 所要=%.1fs 打ち切り=%v", route, time.Since(job.at).Seconds(), truncated)
+	log.Printf("LINE: 応答 route=%s 所要=%.1fs 打ち切り=%v 指定=%s/%s",
+		route, time.Since(job.at).Seconds(), truncated,
+		orDash(job.mode), orDash(job.model))
 }
 
 // askChatAI は後段へ問い、NDJSON を1本の文字列に畳んで返す。
 //
 // ⚠ 既存の stream() を流用しない。あれはブラウザ向けに SSE へ変換する関数で、
 // LINE には要らない（SSE を経由する意味がない）。
-func askChatAI(question string, budget time.Duration) (text, route string, truncated bool, err error) {
+func askChatAI(job lineJob, budget time.Duration) (text, route string, truncated bool, err error) {
 	ctx, cancel := context.WithTimeout(context.Background(), budget)
 	defer cancel()
 
 	// ⚠ 受け取った JSON を転送せず、ここで組み直す。
 	//    allow_llm はサーバー側の設定値から。system / temperature は**送らない**
 	//    （後段は system が空でなければ人格定義を丸ごと差し替えるため）。
+	// ⚠ 投稿で指定されたのは「答え方」と「モデル」だけ。allow_llm（権限）は設定のまま。
+	//   指定が無ければ設置側の既定に落ちる。
+	mode := job.mode
+	if mode == "" {
+		mode = defaultAnswerMode
+	}
 	body, err := json.Marshal(upstreamRequest{
-		chatRequest: chatRequest{Messages: []message{{Role: "user", Content: question}}},
-		AllowLLM:    allowLLM,
+		chatRequest: chatRequest{
+			Model:      job.model,
+			Messages:   []message{{Role: "user", Content: job.question}},
+			AnswerMode: mode,
+		},
+		AllowLLM: allowLLM,
 	})
 	if err != nil {
 		return "", "none", false, err
@@ -674,4 +751,12 @@ func handleInternalPush(w http.ResponseWriter, r *http.Request) {
 	log.Printf("LINE: push を1通送った")
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Write([]byte("{\"status\":\"sent\"}\n"))
+}
+
+// orDash はログ用。空なら "-" にして桁を揃える。
+func orDash(v string) string {
+	if v == "" {
+		return "-"
+	}
+	return v
 }

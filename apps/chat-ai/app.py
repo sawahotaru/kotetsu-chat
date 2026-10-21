@@ -108,6 +108,14 @@ DEFAULT_SYSTEM = os.getenv("CHAT_SYSTEM_PROMPT", intent_defs.SYSTEM_PROMPT)
 # ルールで答えられる問いをルールで答える。False にすると常に LLM へ回る（比較用）。
 ROUTING_ENABLED = _env_bool("CHAT_ROUTING_ENABLED", True)
 
+# 会話の**途中**で規則が割り込むのに要る確信の下限。
+#
+# 1往復目は従来どおり閾値（router の MATCH_THRESHOLD）だけで決まる。
+# ここが効くのは2往復目以降で、**規則を控えめにするための値**——
+# 低くすると規則が会話に割り込みやすくなり、LLM の出番が減る。
+# 0 にすれば「処理を持つ意図なら常に割り込む」（0.3.5 の挙動）に戻る。
+MID_TURN_THRESHOLD = _env_float("CHAT_MID_TURN_THRESHOLD", 0.5, low=0.0, high=2.0)
+
 # LLM を使うか。**公開版は無効**にしている。
 #
 # 理由は負荷ではなく中身。lab は仕事に繋げるための展示物で、そこに置いたボットが
@@ -263,6 +271,22 @@ class ChatRequest(BaseModel):
     #   自分の設定値で組み直して送るので、この項目は利用者の手の届かない所にある。
     allow_llm: bool = True
 
+    # 答え方。**利用者が明示的に選ぶ。**
+    #
+    #   auto  … 規則で拾えたら規則、拾えなければ LLM（既定）
+    #   llm   … 常に LLM。規則を通さない
+    #   rules … 常に規則。LLM を使わない
+    #
+    # ⚠ これは allow_llm の**中**での選択でしかない。
+    #   allow_llm が偽の口では、"llm" を指定しても LLM は動かない。
+    #   「使うか使わないか」の権限は設置側（allow_llm）が握ったまま、
+    #   「今回どう答えさせるか」だけを利用者が選ぶ、という分け方。
+    #
+    # なぜ要るか: 以前は「1往復目か」「score がいくつか」といった**こちらの推測**で
+    #   経路が決まっていた。使う側から見ると、同じ問いが場面によって規則にも LLM にも
+    #   なり、しかもなぜそうなったか分からない。選べるほうが筋が通る。
+    answer_mode: Literal["auto", "llm", "rules"] = "auto"
+
 
 # ---- エンドポイント ----
 
@@ -277,13 +301,16 @@ async def healthz() -> dict[str, str]:
 
 
 @app.get("/persona")
-async def persona() -> dict:
+async def persona(allow_llm: bool = True) -> dict:
     """画面を組み立てるのに要るもの（表題・名乗り・質問例）を返す。
 
     前段(Go)に埋め込まず、ここから配る。前段は器のままにしておき、
     差し替えるのは内容ファイルだけで済むようにするため。
+
+    allow_llm は /models と同じ（呼び出した口が LLM を使うか）。「答え方」の一文を
+    ここで確定させている以上、口ごとの違いを渡さないと画面が嘘をつく。
     """
-    return intent_defs.ui_payload(LLM_ENABLED)
+    return intent_defs.ui_payload(LLM_ENABLED and allow_llm)
 
 
 @app.get("/avatar")
@@ -302,12 +329,17 @@ async def avatar() -> FileResponse:
 
 
 @app.get("/models")
-async def models() -> dict:
+async def models(allow_llm: bool = True) -> dict:
     """使えるモデルと、その準備状況を返す。
 
     Ollama 側に実際に存在するかも確認する（pull の記録だけを信じない）。
+
+    allow_llm は**呼び出した口**が LLM を使うかどうか（前段が添える）。ここは口ごとの
+    設定を知らないので、これが無いと Web の口（LLM 不使用）にもモデル一覧を返してしまい、
+    画面が「＋LLM」と名乗るのに答えは必ず規則から返る、という食い違いになる。
+    省略時は True＝従来どおり（添えない古い前段とも噛み合う）。
     """
-    if not LLM_ENABLED:
+    if not (LLM_ENABLED and allow_llm):
         # 無効時は ollama が起動していないのが正常。接続を試みて警告を出す意味が無い。
         return {
             "models": [],
@@ -471,34 +503,79 @@ async def chat(req: ChatRequest) -> StreamingResponse:
     headers = {"Cache-Control": "no-store", "X-Accel-Buffering": "no"}
     last_user = req.messages[-1].content if req.messages else ""
 
-    # 会話が続いている最中はルールに割り込ませない。
-    # 「東京の天気は？」→「じゃあ大阪は？」のような続きを、単発の質問として
-    # 誤って拾ってしまうため。2往復目からは LLM に文脈ごと任せる。
-    # ただし LLM が無効なら渡す先が無いので、常にルートを試みる。
-    first_turn = len(req.messages) == 1
+    # 答え方は**利用者が選ぶ**。こちらの推測で決めない。
+    #
+    #   auto  … 規則で拾えたら規則、拾えなければ LLM（既定）
+    #   llm   … 常に LLM。規則を通さない
+    #   rules … 常に規則。LLM を使わない
+    #
+    # ⚠ mode は allow_llm の**中**での選択でしかない。
+    #   allow_llm が偽の口では "llm" を指定しても LLM は動かない
+    #   （下の llm_available が偽のままになる）。権限は設置側が握ったまま。
+    mode = req.answer_mode
+    if mode == "llm" and not (LLM_ENABLED and req.allow_llm):
+        # 使えない口で「LLMだけ」と言われても、黙って何も返さないのは不親切。
+        # 規則で答えられるならそちらで答える（auto と同じ振る舞いに落とす）。
+        mode = "auto"
 
-    # 実効値 = サーバーが持っているか（ollamaが動いているか）× 呼び出し側が望むか
-    llm_available = LLM_ENABLED and req.allow_llm
+    llm_available = LLM_ENABLED and req.allow_llm and mode != "rules"
+
+    # 何往復目か。auto のときだけ意味を持つ（下の use_rule を参照）。
+    first_turn = len(req.messages) == 1
 
     # どちらの経路を通ったかは外から見えない。ルールが素通りされていても
     # 「LLM がそう答えた」ようにしか見えず、原因の切り分けができないので残す。
     log.info(
-        "受信 messages=%d first_turn=%s allow_llm=%s llm_available=%s",
-        len(req.messages), first_turn, req.allow_llm, llm_available,
+        "受信 messages=%d mode=%s first_turn=%s allow_llm=%s llm_available=%s",
+        len(req.messages), mode, first_turn, req.allow_llm, llm_available,
     )
 
-    if ROUTING_ENABLED and (first_turn or not llm_available):
+    intent, score = (None, 0.0)
+    if ROUTING_ENABLED and mode != "llm":
         intent, score = router.match(last_user)
-        # ⚠ 利用者の文面は記録しない（「会話は残さぬ」と答えている以上、破ってはならぬ）。
-        #    残すのは判定結果だけ。閾値の調整にはこれで足りる。
-        log.info("照合 intent=%s score=%.3f", intent.name if intent else None, score)
         if intent is not None:
-            log.info("ルートで応答 intent=%s score=%.2f", intent.name, score)
-            return StreamingResponse(
-                respond_with_rule(last_user, intent, score, llm_available),
-                media_type="application/x-ndjson",
-                headers=headers,
-            )
+            # ⚠ 利用者の文面は記録しない（「会話は残さぬ」と答えている以上、破ってはならぬ）。
+            #    残すのは判定結果だけ。閾値の調整にはこれで足りる。
+            log.info("照合 intent=%s score=%.3f", intent.name, score)
+
+    # auto のときだけ、規則と LLM のどちらに回すかを決める必要がある。
+    #
+    #   1) 1往復目          … 会話が始まる前なので、文脈を読む必要がない
+    #   2) LLM が無い設置    … 渡す先が無いので常に規則を試す
+    #   3) 処理を持つ意図で、確信が下限を超えている
+    #
+    # 3 があるのは、天気・在庫・予約の空きが **モデルの知りようのない事実**だから。
+    # これが無いと「2往復目の『東京の天気は？』」に LLM が作り話で答える。
+    #
+    # ⚠ 3 には確信の下限が要る。処理を持つというだけで割り込ませると、
+    #   閾値すれすれの当たりが会話を止める（「日本の四季について」が
+    #   wikipedia に 0.39 で当たり、語を切り出せぬまま案内文を返した）。
+    #   同じ内容ファイルで両側を測ると分かれた:
+    #     割り込むべき  weather 0.69 / product_search 0.74 / trivia 1.12 … 最小 0.57
+    #     任せるべき    wikipedia の誤爆 0.38〜0.39            … 最大 0.39
+    #   内容ファイルを差し替えると分布も変わるので、値は外から変えられる。
+    if mode == "rules":
+        use_rule = intent is not None
+    elif mode == "llm":
+        use_rule = False
+    else:
+        use_rule = intent is not None and (
+            first_turn
+            or not llm_available
+            or (intent.handler is not None and score >= MID_TURN_THRESHOLD)
+        )
+
+    if use_rule:
+        log.info(
+            "ルートで応答 intent=%s score=%.2f 往復=%s 処理=%s",
+            intent.name, score, "初" if first_turn else "途中",
+            "有" if intent.handler is not None else "無",
+        )
+        return StreamingResponse(
+            respond_with_rule(last_user, intent, score, llm_available),
+            media_type="application/x-ndjson",
+            headers=headers,
+        )
 
     if not llm_available:
         # 「分かりません」で終わらせず、答えられることを示す。

@@ -174,3 +174,114 @@ func TestLimiterPerKey(t *testing.T) {
 		t.Error("別グループは別のバケツであるはず")
 	}
 }
+
+// ---- 答え方の選択（answer_mode）----
+//
+// 画面から「規則を優先／LLMだけ／規則だけ」を選ぶ。
+// ⚠ 前段でやるのは**綴りの検め**だけ。知らない値で会話そのものを失敗させない
+//
+//	（後段は Literal で検証するので、素通しすると 422 になる）。
+func TestNormalizeAnswerMode(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"auto", "auto"},
+		{"llm", "llm"},
+		{"rules", "rules"},
+		{"", "auto"},              // 指定なしは既定
+		{"LLM", "auto"},           // 綴り違いは既定へ（大文字小文字は区別する）
+		{"rules_only", "auto"},    // 古い画面が送ってきても壊さない
+		{"'; DROP TABLE", "auto"}, // 素性の知れない値も既定へ
+	}
+	for _, tt := range tests {
+		if got := normalizeAnswerMode(tt.in); got != tt.want {
+			t.Errorf("normalizeAnswerMode(%q) = %q, 期待 %q", tt.in, got, tt.want)
+		}
+	}
+}
+
+// 答え方は**権限ではない**。閉じてある口を開く力は無いこと。
+//
+// allow_llm（設置側の設定）が偽なら、"llm" を選んでも後段で LLM は動かない。
+// 前段は allow_llm をそのまま送るだけで、答え方に応じて書き換えたりしない——
+// ここで両者を混ぜると、「答え方の選択で権限が動く」道が生まれる。
+func TestAnswerModeIsNotAPermission(t *testing.T) {
+	for _, mode := range []string{"auto", "llm", "rules", "でたらめ"} {
+		req := &chatRequest{AnswerMode: mode}
+		req.AnswerMode = normalizeAnswerMode(req.AnswerMode)
+		if req.AnswerMode != "auto" && req.AnswerMode != "llm" && req.AnswerMode != "rules" {
+			t.Errorf("検めた後に知らない値が残った: %q", req.AnswerMode)
+		}
+	}
+}
+
+// ---- 投稿の頭で答え方・モデルを指定する（LINE_PREFIXES）----
+//
+// LINE には画面が無いので、選ばせるにはこれしか手が無い。
+//
+//	「規 東京の天気は？」→ 規則だけで答える
+//	「低 むかし話をして」→ 小さいモデルで答える
+func TestParseLinePrefixes(t *testing.T) {
+	got := parseLinePrefixes(" 規=@rules, 低=gemma3:1b ,, 高=qwen2.5:3b , こわれ ")
+	want := map[string]string{"規": "@rules", "低": "gemma3:1b", "高": "qwen2.5:3b"}
+	if len(got) != len(want) {
+		t.Fatalf("読めた数が違う: %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%q → %q, 期待 %q", k, got[k], v)
+		}
+	}
+	// 未設定なら空。指定の仕組みごと無いことになる。
+	if len(parseLinePrefixes("")) != 0 {
+		t.Error("未設定なら空であるはず")
+	}
+}
+
+func TestTakeLinePrefix(t *testing.T) {
+	saved := linePrefixes
+	linePrefixes = map[string]string{"規": "@rules", "低": "gemma3:1b"}
+	defer func() { linePrefixes = saved }()
+
+	tests := []struct {
+		name              string
+		in                string
+		mode, model, rest string
+	}{
+		{"答え方を指定", "規 東京の天気は？", "rules", "", "東京の天気は？"},
+		{"モデルを指定", "低 むかし話をして", "", "gemma3:1b", "むかし話をして"},
+		{"全角の空白でも切れる", "規　東京の天気は？", "rules", "", "東京の天気は？"},
+		{"指定が無ければ本文のまま", "東京の天気は？", "", "", "東京の天気は？"},
+		{"知らない字は本文のまま", "超 東京の天気は？", "", "", "超 東京の天気は？"},
+
+		// ⚠ 頭の一語だけを見る。文中に現れても反応してはいけない。
+		{"文中の同じ字には反応しない", "規則について教えて", "", "", "規則について教えて"},
+		{"文の途中の字にも反応しない", "これは規 という字だ", "", "", "これは規 という字だ"},
+
+		// ⚠ 取り除いた結果が空になるなら、それは指定ではなく本文とみなす。
+		{"指定だけで本文が無ければ本文扱い", "規", "", "", "規"},
+		{"指定の後が空白だけでも本文扱い", "規   ", "", "", "規   "},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mode, model, rest := takeLinePrefix(tt.in)
+			if mode != tt.mode || model != tt.model || rest != tt.rest {
+				t.Errorf("takeLinePrefix(%q)\n  得た値: mode=%q model=%q rest=%q\n  期待値: mode=%q model=%q rest=%q",
+					tt.in, mode, model, rest, tt.mode, tt.model, tt.rest)
+			}
+		})
+	}
+}
+
+// 指定の仕組みが無い設置では、本文が一切変わらないこと。
+// ⚠ ここが崩れると、頭の一語が黙って消える設置が生まれる。
+func TestTakeLinePrefixDisabled(t *testing.T) {
+	saved := linePrefixes
+	linePrefixes = map[string]string{}
+	defer func() { linePrefixes = saved }()
+
+	for _, in := range []string{"規 東京の天気は？", "低 むかし話", "ふつうの質問"} {
+		mode, model, rest := takeLinePrefix(in)
+		if mode != "" || model != "" || rest != in {
+			t.Errorf("未設定なのに解釈した: %q → %q/%q/%q", in, mode, model, rest)
+		}
+	}
+}
