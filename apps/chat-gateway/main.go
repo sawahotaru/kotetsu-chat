@@ -385,9 +385,10 @@ func main() {
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	// client_params は画面が見る。効かない欄を見せないため（押しても無視される物を出さない）。
+	// version は返さない（公開物の安全方針: 版数は外に出さない。起動ログには出している）。
 	fmt.Fprintf(w,
-		"{\"status\":\"ok\",\"version\":%q,\"client_params\":%t,\"client_mode\":%t,\"answer_mode\":%q}\n",
-		version, allowClientParams, allowClientMode, defaultAnswerMode)
+		"{\"status\":\"ok\",\"client_params\":%t,\"client_mode\":%t,\"answer_mode\":%q}\n",
+		allowClientParams, allowClientMode, defaultAnswerMode)
 }
 
 func handleUI(w http.ResponseWriter, r *http.Request) {
