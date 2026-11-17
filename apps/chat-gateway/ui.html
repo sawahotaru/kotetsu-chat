@@ -512,8 +512,8 @@
       const ready = data.models.find((m) => m.ready);
       if (ready) modelSel.value = ready.name;
 
-      if (!data.ollama_reachable) {
-        addNotice(L("ollamaDown", "応答の準備ができていません。起動直後の場合は少し待つと繋がります。"), true);
+      if (!data.engine_reachable) {
+        addNotice(L("engineDown", "応答の準備ができていません。起動直後の場合は少し待つと繋がります。"), true);
       } else if (!ready) {
         // 初回起動はモデルのダウンロードに数分かかる。黙って待たせない。
         addNotice(L("modelPulling", "モデルを取得しています。初回は数分かかります。自動で確認し続けます…"));

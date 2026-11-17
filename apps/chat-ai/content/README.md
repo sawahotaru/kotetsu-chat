@@ -223,7 +223,7 @@ ui:
 | `modeLlm` / `modeRules` | `mode_label` を書かなかったときの既定 |
 | `routeRule` / `routeNoneName` / `routeNone` / `seconds` | 吹き出しの下の「どちらが答えたか」 |
 | `error` / `emptyAnswer` / `stopped` / `cleared` / `restored` | 会話中の報せ |
-| `ollamaDown` / `modelPulling` / `modelsFailed` / `modelsFailedOption` | モデルまわりの報せ（LLM 有効時のみ） |
+| `engineDown` / `modelPulling` / `modelsFailed` / `modelsFailedOption` | モデルまわりの報せ（LLM 有効時のみ） |
 
 ⚠ **これは本格的な多言語化ではない。** 一つの設置につき一つの言語という前提で、
 文言を差し替えられるようにしただけ。閲覧者ごとに切り替える仕掛けは無い。

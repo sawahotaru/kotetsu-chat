@@ -127,6 +127,20 @@ if AVATAR_PATH is not None and not AVATAR_PATH.is_file():
     AVATAR_PATH = None
 
 
+# 旧い文言キー → 今のキー。内容ファイルに旧名で書いてある設置もそのまま効かせる。
+# （engineDown は以前 ollamaDown という名だった。画面のコードに製品名を残さないため改名）
+_LABEL_ALIASES = {"ollamaDown": "engineDown"}
+
+
+def _labels() -> dict:
+    labels = dict(UI.get("labels") or {})
+    for old, new in _LABEL_ALIASES.items():
+        if old in labels:
+            labels.setdefault(new, labels[old])
+            del labels[old]
+    return labels
+
+
 def ui_payload(llm_enabled: bool) -> dict:
     """前段が画面を組み立てるのに要るものを返す。
 
@@ -149,7 +163,7 @@ def ui_payload(llm_enabled: bool) -> dict:
         # 画面の文言（ボタン・報せ）。**書かれていなくてよい。**
         # 前段が既定を持っており、ここに書かれた分だけが上書きされる。
         # 案内役の口調に合わせたい、あるいは別の言語で出したいときに使う。
-        "labels": UI.get("labels") or {},
+        "labels": _labels(),
         "has_avatar": AVATAR_PATH is not None,
     }
 

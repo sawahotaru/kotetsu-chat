@@ -74,7 +74,7 @@ ui:
     routeNoneName: 決まった答えのみ
     routeNone: お答えできない内容
     seconds: " 秒"
-    ollamaDown: AI に接続できていません。起動直後の場合は少し待つと繋がります。
+    engineDown: AI に接続できていません。起動直後の場合は少し待つと繋がります。
     modelPulling: モデルを取得しています。初回は数分かかります。
     modelsFailed: モデル一覧を取得できませんでした
     modelsFailedOption: 取得できませんでした

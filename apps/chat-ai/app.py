@@ -345,7 +345,7 @@ async def models(allow_llm: bool = True) -> dict:
             "models": [],
             "default": "",
             "system_prompt": "",
-            "ollama_reachable": False,
+            "engine_reachable": False,
             "llm_enabled": False,
         }
 
@@ -371,7 +371,7 @@ async def models(allow_llm: bool = True) -> dict:
         "models": items,
         "default": DEFAULT_MODEL,
         "system_prompt": DEFAULT_SYSTEM,
-        "ollama_reachable": reachable,
+        "engine_reachable": reachable,
         "llm_enabled": True,
     }
 
