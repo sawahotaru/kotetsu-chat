@@ -202,8 +202,8 @@
 (() => {
   "use strict";
 
-  const MAX_CHARS = 2000;   // 前段(Go)の CHAT_MAX_MESSAGE_CHARS と揃える
-  const MAX_HISTORY = 8;    // 同 CHAT_MAX_HISTORY
+  const MAX_CHARS = 2000;   // サーバー側の上限と揃える
+  const MAX_HISTORY = 8;    // 同上（送る履歴の件数）
 
   const $ = (id) => document.getElementById(id);
   const log = $("log"), input = $("input"), form = $("form"), sendBtn = $("send");
@@ -391,9 +391,9 @@
 
   // ---- モデル一覧 ----
 
-  // 画面に出す文言と顔は**後段が持っている**。ここで取りに行って流し込む。
+  // 画面に出す文言と顔はサーバーから受け取る。ここで取りに行って流し込む。
   //
-  // 前段に埋め込まないのは、内容ファイル(content/)を差し替えたときに
+  // 画面に埋め込まないのは、内容ファイル(content/)を差し替えたときに
   // 表題や名乗りだけ古いまま残るのを避けるため。器と中身を混ぜない。
   async function loadPersona() {
     let p;
@@ -469,9 +469,9 @@
       llmEnabled = data.llm_enabled !== false;
       $("llmSettings").hidden = !llmEnabled;
 
-      // temperature とシステムプロンプトは、設置側が許していなければ**前段が捨てる**。
-      // 捨てられる欄を出しておくと「動かしたのに効かない」になる。器のほうを畳む。
-      // ⚠ 守りはここではなく前段（CHAT_ALLOW_CLIENT_PARAMS）。これは見た目を合わせるだけ。
+      // temperature とシステムプロンプトは、設置側が許していなければ効かない。
+      // 効かない欄を出しておくと「動かしたのに効かない」になる。器のほうを畳む。
+      // ⚠ これは見た目を合わせるだけ。
       try {
         const hz = await (await fetch("healthz")).json();
         if (hz.client_params === false) {

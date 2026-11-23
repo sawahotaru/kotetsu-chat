@@ -1,4 +1,4 @@
-# チャットの前段（Go）: 静的バイナリを distroless に載せる（最軽・ARM64対応）
+# チャットの前段（Go）: 静的バイナリを distroless に載せる（最軽）
 FROM golang:1.26-alpine AS build
 WORKDIR /src
 COPY go.mod .

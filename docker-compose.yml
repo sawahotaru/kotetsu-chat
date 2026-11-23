@@ -1,7 +1,4 @@
-# チャットだけを動かす compose。
-#
-# lab の統合 compose（../../docker-compose.yml）には Caddy・PostgreSQL・EC・
-# 予約システム・バックアップまで入っている。チャットを人に渡すのにそれは要らない。
+# この compose はチャットだけを動かす。
 # ここは **前段(Go) + 後段(Python)** の二つだけ。LLM を使うときだけ ollama が増える。
 #
 #   docker compose up -d --build        規則だけで応答（LLM 無し・推奨）
@@ -38,6 +35,13 @@ services:
       # IP ごとのレート制限。公開するなら**必ず**掛ける（README の注意を参照）。
       CHAT_RATE_PER_MIN: ${CHAT_RATE_PER_MIN:-12}
       CHAT_RATE_BURST: ${CHAT_RATE_BURST:-5}
+      # 前に置いた逆代理（TLS を張る中継）のアドレス。CIDR か IP を、カンマか空白で区切る。
+      # private と書くと、ループバックと私設アドレス（同じ機械・同じ docker ネットワーク）を指す。
+      # ⚠ 空（既定）なら X-Forwarded-For を一切見ず、接続元の IP で数える。
+      #   逆代理の後ろに置くなら必ず書くこと（書かないと全員が逆代理の IP、つまり 1 人分の枠を分け合う）。
+      CHAT_TRUSTED_NETS: ${CHAT_TRUSTED_NETS:-}
+      # レート制限のために覚えておく利用者の数の上限。超えた分は共通の枠を分け合う。
+      CHAT_RATE_MAX_KEYS: ${CHAT_RATE_MAX_KEYS:-}
       CHAT_MAX_MESSAGE_CHARS: ${CHAT_MAX_MESSAGE_CHARS:-2000}
       CHAT_MAX_HISTORY: ${CHAT_MAX_HISTORY:-8}
       CHAT_QUEUE_WAIT_SECONDS: ${CHAT_QUEUE_WAIT_SECONDS:-30}
@@ -101,11 +105,10 @@ services:
     environment:
       OLLAMA_URL: http://ollama:11434
       # 先頭が既定。⚠ 1〜3B 級に限る（7B 以上は CPU では実用にならない）。
-      # 実測で qwen2.5:3b を既定にした。同じ人格プロンプトで8問試したところ:
-      #   gemma3:1b は 6/8 で口調を保ち、**1回は一人称の規則を破って役を降りた**
-      #   qwen2.5:3b は 8/8・違反0
-      # ⚠ 3b は冷えていると 54秒かかる。下の OLLAMA_KEEP_ALIVE で常駐させて初めて実用になる。
-      #   RAM が乏しい機械では gemma3:1b（冷えても23秒）に戻すこと。
+      # qwen2.5:3b を既定にしたのは、同じ人格プロンプトで口調を保てたため
+      # （1B 級は一人称の規則を破って役を降りることがあった）。
+      # ⚠ 3b は冷えていると遅い。下の OLLAMA_KEEP_ALIVE で常駐させて初めて実用になる。
+      #   RAM が乏しい機械では gemma3:1b に戻すこと。
       CHAT_MODELS: ${CHAT_MODELS:-qwen2.5:3b,gemma3:1b,qwen2.5:1.5b}
       CHAT_NUM_PREDICT: ${CHAT_NUM_PREDICT:-192}
       CHAT_LLM_ENABLED: ${CHAT_LLM_ENABLED:-0}
@@ -152,14 +155,13 @@ services:
       OLLAMA_HOST: 0.0.0.0
       # 1本ずつ生成する。並列にするとCPUを取り合って両方が遅くなる。
       OLLAMA_NUM_PARALLEL: "1"
-      # ⚠ 載せておくモデルの数。1 だと切り替えるたびに載せ直す
-      #   （実測: 同じモデルなら 1.2〜1.4秒、交互だと 5.7〜11.5秒）。
-      #   2 なら両方が居座り、画面のモデル切り替えが只になる。RAM は 3b+1b で 3.4GB。
+      # ⚠ 載せておくモデルの数。1 だと切り替えるたびに載せ直すので、交互に使うと遅くなる。
+      #   2 なら両方が居座り、画面のモデル切り替えが只になる（そのぶん RAM を食う）。
       #   ⚠ 「載せる数」であって「同時に走らせる数」ではない（それは上の NUM_PARALLEL）。
       OLLAMA_MAX_LOADED_MODELS: ${OLLAMA_MAX_LOADED_MODELS:-2}
-      # モデルをメモリに載せたままにする（-1 = 降ろさない）。常駐は 3b で 2.4GB。
-      # ⚠ 以前は 5m で降ろしていたが、実測すると降ろす代償のほうが大きい
-      #   （qwen2.5:3b は 温 18秒 / 冷 54秒）。間を空けて話しかけられる口では
+      # モデルをメモリに載せたままにする（-1 = 降ろさない）。
+      # ⚠ 以前は 5m で降ろしていたが、降ろす代償のほうが大きかった
+      #   （冷えた状態からの応答は、温まった状態よりずっと遅い）。間を空けて話しかけられる口では
       #   毎回が「冷」になる。RAM が乏しければ 5m に戻し、モデルも軽い方にすること。
       OLLAMA_KEEP_ALIVE: ${OLLAMA_KEEP_ALIVE:--1}
     volumes:

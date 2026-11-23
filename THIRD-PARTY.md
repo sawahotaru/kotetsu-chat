@@ -51,4 +51,4 @@
 
 - Go: 標準ライブラリのみ（外部依存なし）
 - Python: `fastapi` / `uvicorn` / `httpx`（すべて MIT または BSD 系）
-- 実行基盤: Caddy（Apache-2.0）、PostgreSQL（PostgreSQL License）、Docker イメージ各種
+- 実行基盤: Docker イメージ各種（各イメージの条件に従う）

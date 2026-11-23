@@ -6,8 +6,8 @@
 //	ブラウザ ──SSE── chat-gateway(Go) ──NDJSON── chat-ai(Python) ──> ollama
 //
 // ここで守っているもの:
-//   - 同時生成数の制限。VM は 4 コア CPU のみで GPU が無い。2本同時に走らせると
-//     どちらも遅くなるうえ、同居している ec-api / clinic まで巻き添えになる。
+//   - 同時生成数の制限。GPU の無い機械で 2 本同時に走らせると、どちらも遅くなり、
+//     同じ機械の他の仕事にも響く。
 //     だから「並列で捌く」のではなく「並ばせて1本ずつ流す」。
 //   - IP ごとのレート制限（トークンバケット）。
 //   - 入力長・履歴長の上限。後段に着く前に切る。
@@ -26,6 +26,7 @@ import (
 	"log"
 	"net"
 	"net/http"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -38,12 +39,12 @@ var uiHTML []byte
 
 // ---- 設定（環境変数。すべて既定値を持つ）----
 
-// 配る物の版。⚠ 後段(settings.py の VERSION)と CHANGELOG.md の見出しに揃えること。
+// 配る物の版。⚠ 後段(settings.py の VERSION)と変更の記録に揃えること。
 //
 // 突き合わせは起動時に行わない。照らすには互いを呼ぶ必要があり、
 // 起動の順番に依存する脆い確認になるため。代わりに両方の /healthz に出しておき、
 // 食い違っていれば見て分かるようにしてある。
-const version = "0.4.0"
+const version = "0.5.0"
 
 var (
 	aiBase         = env("CHAT_AI_URL", "http://chat-ai:8000")
@@ -54,6 +55,15 @@ var (
 	maxHistory     = envInt("CHAT_MAX_HISTORY", 8)
 	rateBurst      = envInt("CHAT_RATE_BURST", 5)
 	ratePerMin     = envInt("CHAT_RATE_PER_MIN", 12)
+
+	// 利用者の IP を決めるときに飛ばす逆代理のレンジ（解釈は validateConfig で行う）。
+	trustedNetsRaw = os.Getenv("CHAT_TRUSTED_NETS")
+
+	// レート制限のために覚えておく利用者の数の上限。超えた分は共通の枠を分け合う。
+	maxBuckets = envInt("CHAT_RATE_MAX_KEYS", 16384)
+
+	// trustedNetsRaw を解釈した結果。テストから差し替えられるように var で持つ。
+	trustedNets []netip.Prefix
 
 	// この口（Web）から来た質問に LLM を使わせるか。既定は **false**。
 	//
@@ -166,9 +176,46 @@ func validateConfig() {
 			"（順番待ちだけで生成の持ち時間を使い切ってしまう）",
 			queueWait.Seconds(), genTimeout.Seconds())
 	}
+	nets, err := parseTrustedNets(trustedNetsRaw)
+	if err != nil {
+		log.Fatalf("設定エラー: CHAT_TRUSTED_NETS=%q を読めません（%v）。CIDR か IP を、カンマか空白で区切って書いてください（private でループバックと私設レンジ）",
+			trustedNetsRaw, err)
+	}
+	trustedNets = nets
 	if lineMode {
 		validateLineConfig() // 足りなければここで止まる（別モードへ倒れない）
 	}
+}
+
+// parseTrustedNets は CHAT_TRUSTED_NETS を読む。区切りはカンマと空白。
+// private の 1 語は、ループバックと私設レンジに展開する。
+// 空なら 0 件でエラーにしない（何も信頼しない＝X-Forwarded-For を見ない）。
+func parseTrustedNets(s string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	fields := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t' || r == '\n' || r == '\r'
+	})
+	for _, f := range fields {
+		if f == "private" {
+			for _, c := range []string{
+				"127.0.0.0/8", "::1/128", "10.0.0.0/8",
+				"172.16.0.0/12", "192.168.0.0/16", "fc00::/7",
+			} {
+				out = append(out, netip.MustParsePrefix(c))
+			}
+			continue
+		}
+		if p, err := netip.ParsePrefix(f); err == nil {
+			out = append(out, p.Masked())
+			continue
+		}
+		a, err := netip.ParseAddr(f)
+		if err != nil {
+			return nil, fmt.Errorf("%q は CIDR でも IP でもありません", f)
+		}
+		out = append(out, netip.PrefixFrom(a, a.BitLen()))
+	}
+	return out, nil
 }
 
 // ---- 同時実行の制御 ----
@@ -199,18 +246,35 @@ type bucket struct {
 	last   time.Time
 }
 
-var (
-	bucketsMu sync.Mutex
-	buckets   = map[string]*bucket{}
+const (
+	maxKeyLen   = 64         // キーの長さの上限（IPv6 の文字列表現の最大 45 字より大きい）
+	maxHops     = 16         // X-Forwarded-For を右から辿る数の上限
+	overflowKey = "overflow" // 上限を超えた分がまとまる共通のキー
+	invalidKey  = "invalid"  // IP として読めなかった要求がまとまる共通のキー
 )
 
-// allow は該当IPが1回分の生成をしてよいかを返す。
+var (
+	bucketsMu     sync.Mutex
+	buckets       = map[string]*bucket{}
+	overflowCount int // 共通のキーへ回した回数。bucketsMu で守る
+)
+
+// allow は該当のキー（利用者）が1回分の生成をしてよいかを返す。
 func allow(ip string) bool {
 	now := time.Now()
 	refill := float64(ratePerMin) / 60.0 // 1秒あたりの回復量
 
 	bucketsMu.Lock()
 	defer bucketsMu.Unlock()
+
+	// キーが長すぎる、または件数が上限でまだ無いキーは、共通のキーにまとめる。
+	if len(ip) > maxKeyLen {
+		ip = overflowKey
+		overflowCount++
+	} else if _, exists := buckets[ip]; !exists && len(buckets) >= maxBuckets {
+		ip = overflowKey
+		overflowCount++
+	}
 
 	b, ok := buckets[ip]
 	if !ok {
@@ -232,31 +296,96 @@ func allow(ip string) bool {
 
 // sweepBuckets は満タンに戻った古いIPを捨てる。放置するとIPの数だけメモリが増える。
 func sweepBuckets() {
-	for range time.Tick(10 * time.Minute) {
-		cutoff := time.Now().Add(-30 * time.Minute)
-		bucketsMu.Lock()
-		for ip, b := range buckets {
-			if b.last.Before(cutoff) {
-				delete(buckets, ip)
-			}
-		}
-		bucketsMu.Unlock()
+	for now := range time.Tick(10 * time.Minute) {
+		sweepBucketsOnce(now)
 	}
 }
 
-// clientIP は Caddy が付ける X-Forwarded-For の左端＝本来のクライアントを取る。
-// Caddy 側で trusted_proxies を設定済みなので、ここに来る値は詐称されていない前提でよい。
-func clientIP(r *http.Request) string {
-	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-		if i := strings.IndexByte(xff, ','); i >= 0 {
-			return strings.TrimSpace(xff[:i])
+// sweepBucketsOnce は 1 回分の掃除。30 分より古いものを捨て、
+// 上限を超えて共通の枠に回した件数があれば記録する（IP は出さない）。
+func sweepBucketsOnce(now time.Time) {
+	cutoff := now.Add(-30 * time.Minute)
+	bucketsMu.Lock()
+	defer bucketsMu.Unlock()
+	for ip, b := range buckets {
+		if b.last.Before(cutoff) {
+			delete(buckets, ip)
 		}
-		return strings.TrimSpace(xff)
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+	if overflowCount > 0 {
+		log.Printf("レート制限: 記録の上限（%d 件）を超えたため共通の枠に回した要求 %d 件", maxBuckets, overflowCount)
+		overflowCount = 0
 	}
-	return r.RemoteAddr
+}
+
+// clientIP は利用者の IP を決める。
+// 直接の接続元が信頼する逆代理（CHAT_TRUSTED_NETS）のときだけ X-Forwarded-For を見る。
+// 右から辿り、信頼する逆代理のレンジだけを飛ばして、最初に出会った信頼しない IP を採る。
+// 左側は送信者が自由に書けるので、そこまでは辿らない。
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return invalidKey
+	}
+	cur, err := netip.ParseAddr(host)
+	if err != nil {
+		return invalidKey
+	}
+	cur = cur.WithZone("").Unmap()
+	if !isTrusted(cur) {
+		return ipKey(cur) // 逆代理を経ていない接続。X-Forwarded-For は見ない
+	}
+
+	var hops []string
+	for _, line := range r.Header.Values("X-Forwarded-For") {
+		hops = append(hops, strings.Split(line, ",")...)
+	}
+	for i, n := len(hops)-1, 0; i >= 0; i, n = i-1, n+1 {
+		if n >= maxHops {
+			return invalidKey // 信頼するレンジが続きすぎる
+		}
+		a, ok := parseForwardedAddr(hops[i])
+		if !ok {
+			return invalidKey // ヘッダーの生の文字列はキーにしない
+		}
+		if !isTrusted(a) {
+			return ipKey(a)
+		}
+		cur = a
+	}
+	return ipKey(cur) // すべて信頼するレンジだった
+}
+
+// parseForwardedAddr は X-Forwarded-For の 1 要素を IP にする。
+// ポート付き・角括弧付き・IPv4 射影・ゾーン付きを正規化する。
+func parseForwardedAddr(s string) (netip.Addr, bool) {
+	s = strings.TrimSpace(s)
+	if ap, err := netip.ParseAddrPort(s); err == nil {
+		return ap.Addr().WithZone("").Unmap(), true
+	}
+	a, err := netip.ParseAddr(strings.Trim(s, "[]"))
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return a.WithZone("").Unmap(), true
+}
+
+// isTrusted は a が信頼する逆代理のレンジに入るかを返す。
+func isTrusted(a netip.Addr) bool {
+	for _, p := range trustedNets {
+		if p.Contains(a) {
+			return true
+		}
+	}
+	return false
+}
+
+// ipKey はレート制限のキーにする。IPv4 は IP そのもの、IPv6 は /64 単位。
+func ipKey(a netip.Addr) string {
+	if a.Is4() {
+		return a.String()
+	}
+	return netip.PrefixFrom(a, 64).Masked().String()
 }
 
 // ---- リクエスト/レスポンスの型 ----
@@ -340,13 +469,13 @@ func main() {
 		// ⚠ ここを分岐にせず「LINE の経路を足すだけ」にすると、同じイメージを使う以上
 		//	LINE 用プロセスも / と /api/chat を持つ。しかもこの口は CHAT_ALLOW_LLM=1。
 		//	つまり **匿名・無制限・LLM 有効のチャットAPI** が中で動いていて、
-		//	それを止めているのが Caddyfile の1行だけ、という状態になる。
+		//	それを止めているのが逆代理の設定 1 行だけ、という状態になる。
 		//	守りを設定ファイルではなくコードに置くための分岐。
 		startLine()
 		mux.HandleFunc(lineWebhookRoute(), handleLineWebhook)
 		if linePushToken != "" {
 			// 発信の口。合言葉が無ければ**ルートごと生やさない**＝この設置には存在しない。
-			// ⚠ Caddy には通さないこと（docker ネットワーク内からのみ）。
+			// ⚠ 逆代理には通さないこと（docker ネットワーク内からのみ）。
 			mux.HandleFunc("/internal/push", handleInternalPush)
 		}
 	} else {
@@ -364,8 +493,9 @@ func main() {
 	if lineMode {
 		mode = "line"
 	}
-	log.Printf("chat-gateway %s 起動 口=%s addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v 答え方=%s(選択%v)",
-		version, mode, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams, defaultAnswerMode, allowClientMode)
+	log.Printf("chat-gateway %s 起動 口=%s addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v 答え方=%s(選択%v) 信頼レンジ=%d件 記録の上限=%d件",
+		version, mode, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams, defaultAnswerMode, allowClientMode,
+		len(trustedNets), maxBuckets)
 	if lineMode {
 		log.Printf("LINE: 経路=%s 締切=%.0f秒 諦め=%.0f秒 待ち行列=%d 発信の口=%v",
 			lineWebhookRoute(), lineReplyDeadline.Seconds(), lineTokenSafe.Seconds(),
@@ -498,8 +628,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !allow(clientIP(r)) {
-		writeJSONError(w, http.StatusTooManyRequests,
-			fmt.Sprintf("リクエストが多すぎます。1分あたり %d 回までです。", ratePerMin))
+		writeJSONError(w, http.StatusTooManyRequests, msgTooManyRequests)
 		return
 	}
 
@@ -513,7 +642,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/event-stream; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")
-	// Caddy/Cloudflare にバッファさせない（貯め込まれるとストリームの意味が無い）。
+	// 途中の逆代理・CDN にバッファさせない（貯め込まれるとストリームの意味が無い）。
 	w.Header().Set("X-Accel-Buffering", "no")
 	w.WriteHeader(http.StatusOK)
 	flusher.Flush()
@@ -523,7 +652,7 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 	// 順番待ち。空きが無いあいだは待っていることを画面に伝える。
 	if len(slots) >= maxConcurrent {
 		sendEvent(w, flusher, "status", map[string]string{
-			"message": "順番待ちです（このデモはCPU推論のため1件ずつ処理します）",
+			"message": msgQueued,
 		})
 	}
 	if err := acquire(done); err != nil {
@@ -638,6 +767,12 @@ func sendEvent(w http.ResponseWriter, flusher http.Flusher, name string, payload
 	fmt.Fprintf(w, "event: %s\ndata: %s\n\n", name, b)
 	flusher.Flush()
 }
+
+// 利用者の画面に出す文言。上限の数値や処理の仕組みは書かない。
+const (
+	msgTooManyRequests = "リクエストが多すぎます。しばらく時間をおいてからお試しください。"
+	msgQueued          = "順番待ちです。前の方の応答が終わるまでお待ちください。"
+)
 
 func writeJSONError(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")

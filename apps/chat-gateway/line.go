@@ -102,8 +102,8 @@ func splitCSV(s string) []string {
 
 // lineWebhookRoute は webhook の経路を返す。
 //
-// ⚠ Caddy は `handle /line/*`（プレフィックスを剥がさない）で通すこと。
-// `handle_path` にすると `/webhook` が届いてしまい 404 になる。
+// ⚠ 逆代理は /line/ 以下をプレフィックスを剥がさずに通すこと。
+// 剥がす設定にすると `/webhook` が届いてしまい 404 になる。
 func lineWebhookRoute() string {
 	if slug := strings.Trim(os.Getenv("LINE_WEBHOOK_SLUG"), "/"); slug != "" {
 		return "/line/" + slug + "/webhook"
@@ -724,7 +724,7 @@ func linePost(url string, payload any, kind string) error {
 //
 // Bot から話しかける機能そのものは本書のスコープ外。継ぎ目だけ用意しておく。
 //
-// ⚠ Caddy には通さないこと。公開するのは /line/* だけ。
+// ⚠ 逆代理には通さないこと。公開するのは /line/* だけ。
 // 外から叩ければ、誰でもこの Bot の名前で任意のメッセージを送れることになる。
 func handleInternalPush(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

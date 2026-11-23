@@ -160,6 +160,7 @@ CHAT_USER_AGENT=my-site chat (+https://example.com/)   # ⚠ 必ず書き換え�
 | `CHAT_CONTENT_DIR` | （空＝同梱） | 中身の置き場所。`/content` と書くと差し替わる |
 | `CHAT_SITE_HANDLERS` | （空） | 設置ごとの追加処理 |
 | `CHAT_RATE_PER_MIN` / `CHAT_RATE_BURST` | `12` / `5` | IP ごとのレート制限 |
+| `CHAT_TRUSTED_NETS` | （空） | 前に置いた逆代理のアドレス。空なら転送ヘッダーを見ず、接続元の IP で数える |
 | `CHAT_MAX_MESSAGE_CHARS` | `2000` | 1通の長さの上限 |
 | `CHAT_MAX_HISTORY` | `8` | 後段へ送る往復数 |
 | `CHAT_LLM_ENABLED` | `0` | 後段が LLM を使える状態か |
@@ -199,11 +200,15 @@ docker compose --profile llm up -d --build
 Caddy か nginx を前に置き、`chat-gateway` は逆代理からだけ届くようにする。
 `chat-ai` を直接外に出してはならない（前段のレート制限を素通りされる）。
 
+逆代理のアドレスを `CHAT_TRUSTED_NETS` に書くこと。書かないと、全員が逆代理の IP として数えられ、1 人分の枠を分け合う。
+
 ### 2. レート制限を緩めない
 
 `CHAT_RATE_PER_MIN` / `CHAT_RATE_BURST` は IP ごとの上限。
 規則だけの応答は軽いが、LLM を有効にすると **1回の質問が数十秒 CPU を占める**。
 制限が無ければ、一人で全部持っていける。
+
+IPv6 の利用者は /64 単位で数える。覚えておく利用者の数には上限があり（`CHAT_RATE_MAX_KEYS`）、超えた分は共通の枠を分け合う。
 
 ### 3. `CHAT_ALLOW_LLM` の意味を理解する
 
@@ -268,7 +273,7 @@ curl -s http://127.0.0.1:8080/healthz            # 前段
 docker compose logs chat-ai | head -1            # 後段（起動ログの先頭）
 ```
 
-変更の記録は [`CHANGELOG.md`](../apps/chat-ai/CHANGELOG.md)。
+変更の記録は配布元で管理している。
 1.0.0 より前なので、**細かい変更でも中身が入れ替わることがある**。
 
 ---

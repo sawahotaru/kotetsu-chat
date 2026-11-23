@@ -10,7 +10,7 @@
 天気・料金・技術構成のように答えが決まっているものを 1B のモデルに推測させる理由は無い
 （平気で嘘をつく）。ルールは賢さの担当ではなく「よく来る質問を安く正しく捌く」担当。
 
-外部に直接は公開されない（Caddy のルートは前段だけ）。
+外部に直接は公開されない（外に出すのは前段だけ）。
 レート制限・同時実行制御・入力長の上限は前段（Go）の担当なのでここには置かない。
 ただし「壊れた入力で 500 にしない」程度の検証はする（前段を通さず直接叩かれても落ちないように）。
 """
@@ -99,7 +99,7 @@ def _env_bool(key: str, default: bool) -> bool:
 OLLAMA_URL = os.getenv("OLLAMA_URL", "http://ollama:11434")
 
 # 使ってよいモデル。ここに無い名前は受け付けない（任意のモデルを引かせない）。
-# 4コアCPU・GPU無しの前提なので 1〜3B 級に絞る。名前は環境変数で差し替えられる。
+# GPU 無しの前提なので 1〜3B 級に絞る。名前は環境変数で差し替えられる。
 MODELS = [m.strip() for m in os.getenv("CHAT_MODELS", "gemma3:1b,qwen2.5:1.5b").split(",") if m.strip()]
 DEFAULT_MODEL = os.getenv("CHAT_DEFAULT_MODEL", MODELS[0] if MODELS else "gemma3:1b")
 
@@ -127,7 +127,7 @@ MID_TURN_THRESHOLD = _env_float("CHAT_MID_TURN_THRESHOLD", 0.5, low=0.0, high=2.
 # 既定は **無効**（compose の既定と揃える。迷ったら安全な側に倒す）。
 LLM_ENABLED = _env_bool("CHAT_LLM_ENABLED", False)
 
-# 生成の上限。CPU推論なので長文を作らせると数分かかる。
+# 生成の上限。GPU 無しでは長文を作らせると数分かかる。
 NUM_PREDICT = _env_int("CHAT_NUM_PREDICT", 512, minimum=1)
 NUM_CTX = _env_int("CHAT_NUM_CTX", 4096, minimum=256)
 DEFAULT_TEMPERATURE = _env_float("CHAT_TEMPERATURE", 0.7, low=0.0, high=2.0)
@@ -207,8 +207,7 @@ async def pull_model(client: httpx.AsyncClient, model: str) -> None:
 async def pull_all() -> None:
     """モデルを1つずつ順に取得する。
 
-    並行に落とすと 4 コアの VM では帯域もCPUも取り合いになるうえ、
-    ディスク（空き25GB程度）を一気に使う。順番に確実に増やす。
+    並行に落とすと帯域・CPU・ディスクを取り合う。順番に確実に増やす。
     """
     if not LLM_ENABLED:
         log.info("LLM は無効。モデルの取得は行わない（ルールのみで応答する）")
