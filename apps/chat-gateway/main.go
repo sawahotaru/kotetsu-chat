@@ -10,6 +10,8 @@
 //     同じ機械の他の仕事にも響く。
 //     だから「並列で捌く」のではなく「並ばせて1本ずつ流す」。
 //   - IP ごとのレート制限（トークンバケット）。
+//   - 画面が取りに来る一覧・文言・顔にも、会話とは別の枠でレート制限。
+//   - 順番待ちの人数の上限。超えた分は待たせずに断る。
 //   - 入力長・履歴長の上限。後段に着く前に切る。
 //   - 生成中にブラウザが閉じられたら後段へのリクエストも切る（CPUを空ける）。
 package main
@@ -31,6 +33,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -42,9 +45,9 @@ var uiHTML []byte
 // 配る物の版。⚠ 後段(settings.py の VERSION)と変更の記録に揃えること。
 //
 // 突き合わせは起動時に行わない。照らすには互いを呼ぶ必要があり、
-// 起動の順番に依存する脆い確認になるため。代わりに両方の /healthz に出しておき、
+// 起動の順番に依存する脆い確認になるため。代わりに両方の起動ログに出しておき、
 // 食い違っていれば見て分かるようにしてある。
-const version = "0.5.0"
+const version = "0.5.1"
 
 var (
 	aiBase         = env("CHAT_AI_URL", "http://chat-ai:8000")
@@ -59,11 +62,25 @@ var (
 	// 利用者の IP を決めるときに飛ばす逆代理のレンジ（解釈は validateConfig で行う）。
 	trustedNetsRaw = os.Getenv("CHAT_TRUSTED_NETS")
 
+	// 飛ばす逆代理の段数（直接の接続元を 1 段目と数える。解釈は validateConfig）。
+	trustedHopsRaw = os.Getenv("CHAT_TRUSTED_HOPS")
+
 	// レート制限のために覚えておく利用者の数の上限。超えた分は共通の枠を分け合う。
 	maxBuckets = envInt("CHAT_RATE_MAX_KEYS", 16384)
 
+	// 画面が取りに来る一覧・文言・顔（/api/models・/api/persona・/api/avatar）の回数の枠。
+	// 会話の枠とは分ける。画面を開くたびに取りに来るため、分け合うと話せる回数が減る。
+	readRatePerMin = envInt("CHAT_READ_RATE_PER_MIN", 60)
+	readRateBurst  = envInt("CHAT_READ_RATE_BURST", 30)
+
+	// 生成中のほかに、順番を待たせてよい人数。超えた分は待たせずに断る。
+	maxQueue = envInt("CHAT_MAX_QUEUE", 8)
+
 	// trustedNetsRaw を解釈した結果。テストから差し替えられるように var で持つ。
 	trustedNets []netip.Prefix
+
+	// trustedHopsRaw を解釈した結果。テストから差し替えられるように var で持つ。
+	trustedHops int
 
 	// この口（Web）から来た質問に LLM を使わせるか。既定は **false**。
 	//
@@ -171,6 +188,10 @@ func validateConfig() {
 		log.Fatalf("設定エラー: CHAT_RATE_BURST(%d) は CHAT_RATE_PER_MIN(%d) 以下にしてください",
 			rateBurst, ratePerMin)
 	}
+	if readRateBurst > readRatePerMin {
+		log.Fatalf("設定エラー: CHAT_READ_RATE_BURST(%d) は CHAT_READ_RATE_PER_MIN(%d) 以下にしてください",
+			readRateBurst, readRatePerMin)
+	}
 	if queueWait >= genTimeout {
 		log.Fatalf("設定エラー: CHAT_QUEUE_WAIT_SECONDS(%.0f秒) は CHAT_GEN_TIMEOUT_SECONDS(%.0f秒) より短くしてください"+
 			"（順番待ちだけで生成の持ち時間を使い切ってしまう）",
@@ -182,6 +203,12 @@ func validateConfig() {
 			trustedNetsRaw, err)
 	}
 	trustedNets = nets
+	h, err := parseTrustedHops(trustedHopsRaw)
+	if err != nil {
+		log.Fatalf("設定エラー: CHAT_TRUSTED_HOPS=%q を読めません（%v）。0〜%d の整数で書いてください（0 は段数で止めない）",
+			trustedHopsRaw, err, maxHops)
+	}
+	trustedHops = h
 	if lineMode {
 		validateLineConfig() // 足りなければここで止まる（別モードへ倒れない）
 	}
@@ -218,6 +245,23 @@ func parseTrustedNets(s string) ([]netip.Prefix, error) {
 	return out, nil
 }
 
+// parseTrustedHops は CHAT_TRUSTED_HOPS を読む。空なら既定の段数。
+// 0 は「段数で止めない」。envInt は 0 を受け付けないので使わない。
+func parseTrustedHops(s string) (int, error) {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return defaultTrustedHops, nil
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	if n < 0 || n > maxHops {
+		return 0, fmt.Errorf("%d は範囲外です", n)
+	}
+	return n, nil
+}
+
 // ---- 同時実行の制御 ----
 
 // slots は「生成してよい権利」を配るチャネル。容量が同時生成数の上限になる。
@@ -237,6 +281,20 @@ func acquire(done <-chan struct{}) error {
 	}
 }
 
+// chatInFlight は受け付けた会話の数（生成中＋順番待ち）。
+var chatInFlight atomic.Int64
+
+// admitChat は会話を受け付けてよいかを返す。true を返したら必ず leaveChat を呼ぶこと。
+func admitChat() bool {
+	if chatInFlight.Add(1) > int64(maxConcurrent+maxQueue) {
+		chatInFlight.Add(-1)
+		return false
+	}
+	return true
+}
+
+func leaveChat() { chatInFlight.Add(-1) }
+
 func release() { <-slots }
 
 // ---- レート制限（IPごとのトークンバケット）----
@@ -251,6 +309,8 @@ const (
 	maxHops     = 16         // X-Forwarded-For を右から辿る数の上限
 	overflowKey = "overflow" // 上限を超えた分がまとまる共通のキー
 	invalidKey  = "invalid"  // IP として読めなかった要求がまとまる共通のキー
+
+	defaultTrustedHops = 1 // CHAT_TRUSTED_HOPS が空のときの段数
 )
 
 var (
@@ -298,6 +358,7 @@ func allow(ip string) bool {
 func sweepBuckets() {
 	for now := range time.Tick(10 * time.Minute) {
 		sweepBucketsOnce(now)
+		readLimiter.sweepOnce(now)
 	}
 }
 
@@ -318,10 +379,92 @@ func sweepBucketsOnce(now time.Time) {
 	}
 }
 
+// ipLimiter は allow() と同じ規則（長さ・件数の上限と共通の枠、30 分で掃除）を持つ別の枠。
+// 会話の枠（allow）とは記録を共有しない。
+//
+// ⚠ line.go の limiter とは別物。
+type ipLimiter struct {
+	name     string
+	mu       sync.Mutex
+	buckets  map[string]*bucket
+	perMin   int
+	burst    int
+	overflow int // 共通の枠へ回した回数。mu で守る
+}
+
+func newIPLimiter(name string, perMin, burst int) *ipLimiter {
+	return &ipLimiter{name: name, buckets: map[string]*bucket{}, perMin: perMin, burst: burst}
+}
+
+func (l *ipLimiter) allow(key string) bool {
+	now := time.Now()
+	refill := float64(l.perMin) / 60.0
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if len(key) > maxKeyLen {
+		key = overflowKey
+		l.overflow++
+	} else if _, exists := l.buckets[key]; !exists && len(l.buckets) >= maxBuckets {
+		key = overflowKey
+		l.overflow++
+	}
+
+	b, ok := l.buckets[key]
+	if !ok {
+		b = &bucket{tokens: float64(l.burst), last: now}
+		l.buckets[key] = b
+	}
+	b.tokens += now.Sub(b.last).Seconds() * refill
+	if b.tokens > float64(l.burst) {
+		b.tokens = float64(l.burst)
+	}
+	b.last = now
+
+	if b.tokens < 1 {
+		return false
+	}
+	b.tokens--
+	return true
+}
+
+// sweepOnce は 30 分より古い記録を捨て、共通の枠へ回した件数を記録する（IP は出さない）。
+func (l *ipLimiter) sweepOnce(now time.Time) {
+	cutoff := now.Add(-30 * time.Minute)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	for k, b := range l.buckets {
+		if b.last.Before(cutoff) {
+			delete(l.buckets, k)
+		}
+	}
+	if l.overflow > 0 {
+		log.Printf("レート制限（%s）: 記録の上限（%d 件）を超えたため共通の枠に回した要求 %d 件", l.name, maxBuckets, l.overflow)
+		l.overflow = 0
+	}
+}
+
+// readLimiter は一覧・文言・顔の口が分け合う枠。main で作る。
+var readLimiter *ipLimiter
+
+// readLimited は読み取りの口を枠で包む。枠を超えたら後段へ問い合わせずに 429 を返す。
+func readLimited(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !readLimiter.allow(clientIP(r)) {
+			writeJSONError(w, http.StatusTooManyRequests, msgTooManyRequests)
+			return
+		}
+		next(w, r)
+	}
+}
+
 // clientIP は利用者の IP を決める。
 // 直接の接続元が信頼する逆代理（CHAT_TRUSTED_NETS）のときだけ X-Forwarded-For を見る。
-// 右から辿り、信頼する逆代理のレンジだけを飛ばして、最初に出会った信頼しない IP を採る。
-// 左側は送信者が自由に書けるので、そこまでは辿らない。
+// 右から辿り、信頼する逆代理のレンジを飛ばして、最初に出会った信頼しない IP を採る。
+// 飛ばすのは直接の接続元を含めて CHAT_TRUSTED_HOPS 段まで。その次の値は、
+// 信頼するレンジに入っていても利用者とみなす（レンジだけでは、逆代理と同じレンジから
+// 送ってくる利用者を区別できないため）。左側は送信者が自由に書けるので、そこまでは辿らない。
 func clientIP(r *http.Request) string {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
@@ -340,6 +483,7 @@ func clientIP(r *http.Request) string {
 	for _, line := range r.Header.Values("X-Forwarded-For") {
 		hops = append(hops, strings.Split(line, ",")...)
 	}
+	skipped := 1 // 直接の接続元（信頼する逆代理）を 1 段目と数える
 	for i, n := len(hops)-1, 0; i >= 0; i, n = i-1, n+1 {
 		if n >= maxHops {
 			return invalidKey // 信頼するレンジが続きすぎる
@@ -348,10 +492,14 @@ func clientIP(r *http.Request) string {
 		if !ok {
 			return invalidKey // ヘッダーの生の文字列はキーにしない
 		}
+		if trustedHops > 0 && skipped >= trustedHops {
+			return ipKey(a) // 決めた段数を飛ばした。ここより左は送信者が書ける
+		}
 		if !isTrusted(a) {
 			return ipKey(a)
 		}
 		cur = a
+		skipped++
 	}
 	return ipKey(cur) // すべて信頼するレンジだった
 }
@@ -455,12 +603,11 @@ func main() {
 	validateConfig()
 
 	slots = make(chan struct{}, maxConcurrent)
+	readLimiter = newIPLimiter("読み取り", readRatePerMin, readRateBurst)
 	go sweepBuckets()
 
 	mux := http.NewServeMux()
-	// 生きているか、と、何の版か。どちらの口でも出す。版を出すのは、配った先で
-	// 「どれが動いているのか」を確かめる術が他に無いため
-	// （イメージのタグは付け替えられる）。
+	// 生きているか。どちらの口でも出す。版は起動ログに出す。
 	mux.HandleFunc("/healthz", handleHealthz)
 
 	if lineMode {
@@ -479,13 +626,7 @@ func main() {
 			mux.HandleFunc("/internal/push", handleInternalPush)
 		}
 	} else {
-		mux.HandleFunc("/", handleUI)
-		mux.HandleFunc("/api/models", handleModels)
-		// 画面に出す文言と顔は後段が持つ。前段は器のまま保ち、そのまま中継する。
-		// ここに埋め込むと、内容ファイルを差し替えても表題や名乗りが変わらなくなる。
-		mux.HandleFunc("/api/persona", proxyGet("/persona"+allowLLMQuery()))
-		mux.HandleFunc("/api/avatar", proxyGet("/avatar"))
-		mux.HandleFunc("/api/chat", handleChat)
+		registerWeb(mux)
 	}
 
 	addr := ":" + env("PORT", "8080")
@@ -493,9 +634,9 @@ func main() {
 	if lineMode {
 		mode = "line"
 	}
-	log.Printf("chat-gateway %s 起動 口=%s addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v 答え方=%s(選択%v) 信頼レンジ=%d件 記録の上限=%d件",
+	log.Printf("chat-gateway %s 起動 口=%s addr=%s ai=%s 同時生成=%d レート=%d回/分(バースト%d) LLM=%v 利用者設定=%v 答え方=%s(選択%v) 信頼レンジ=%d件 段数=%d 記録の上限=%d件 読み取り=%d回/分(バースト%d) 待ちの上限=%d",
 		version, mode, addr, aiBase, maxConcurrent, ratePerMin, rateBurst, allowLLM, allowClientParams, defaultAnswerMode, allowClientMode,
-		len(trustedNets), maxBuckets)
+		len(trustedNets), trustedHops, maxBuckets, readRatePerMin, readRateBurst, maxQueue)
 	if lineMode {
 		log.Printf("LINE: 経路=%s 締切=%.0f秒 諦め=%.0f秒 待ち行列=%d 発信の口=%v",
 			lineWebhookRoute(), lineReplyDeadline.Seconds(), lineTokenSafe.Seconds(),
@@ -510,6 +651,17 @@ func main() {
 		IdleTimeout:  120 * time.Second,
 	}
 	log.Fatal(srv.ListenAndServe())
+}
+
+// registerWeb は Web の口の経路を mux に載せる（試験から同じ配線を使うため関数にしてある）。
+func registerWeb(mux *http.ServeMux) {
+	mux.HandleFunc("/", handleUI)
+	mux.HandleFunc("/api/models", readLimited(handleModels))
+	// 画面に出す文言と顔は後段が持つ。前段は器のまま保ち、そのまま中継する。
+	// ここに埋め込むと、内容ファイルを差し替えても表題や名乗りが変わらなくなる。
+	mux.HandleFunc("/api/persona", readLimited(proxyGet("/persona"+allowLLMQuery())))
+	mux.HandleFunc("/api/avatar", readLimited(proxyGet("/avatar")))
+	mux.HandleFunc("/api/chat", handleChat)
 }
 
 func handleHealthz(w http.ResponseWriter, r *http.Request) {
@@ -631,6 +783,13 @@ func handleChat(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusTooManyRequests, msgTooManyRequests)
 		return
 	}
+
+	// 待ちの人数に上限を置く。超えた分は SSE を始めずに断る（接続を抱え込まない）。
+	if !admitChat() {
+		writeJSONError(w, http.StatusServiceUnavailable, msgQueueFull)
+		return
+	}
+	defer leaveChat()
 
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -772,6 +931,7 @@ func sendEvent(w http.ResponseWriter, flusher http.Flusher, name string, payload
 const (
 	msgTooManyRequests = "リクエストが多すぎます。しばらく時間をおいてからお試しください。"
 	msgQueued          = "順番待ちです。前の方の応答が終わるまでお待ちください。"
+	msgQueueFull       = "混み合っています。しばらくしてからもう一度お試しください。"
 )
 
 func writeJSONError(w http.ResponseWriter, code int, msg string) {

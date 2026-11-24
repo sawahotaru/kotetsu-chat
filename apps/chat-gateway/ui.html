@@ -274,6 +274,45 @@
     return (typeof v === "string" && v !== "") ? v : fallback;
   };
 
+  // ---- 無害化の小道具（ここから）----
+  // 後段から受け取った文字列を画面に入れるときに使う。HTML としては解釈させない。
+
+  // リンク先。http/https だけを通す（相対は今の頁を基準に解決する）。
+  // 通せないものは null（呼び出し側でリンクごと出さない）。
+  function safeHref(raw, base) {
+    if (typeof raw !== "string" || raw.trim() === "") return null;
+    let u;
+    try { u = new URL(raw.trim(), base); } catch (_) { return null; }
+    return (u.protocol === "http:" || u.protocol === "https:") ? u.href : null;
+  }
+
+  // 文言の中の <b>…</b> だけを太字の区切りとして扱い、ほかは全部ただの文字にする。
+  // 内容ファイルの mode_label は <b> で太字を書く約束のため。
+  function splitBold(s) {
+    const out = [];
+    let bold = false;
+    for (const part of String(s).split(/(<b>|<\/b>)/)) {
+      if (part === "<b>") { bold = true; continue; }
+      if (part === "</b>") { bold = false; continue; }
+      if (part) out.push({ text: part, bold });
+    }
+    return out;
+  }
+  // ---- 無害化の小道具（ここまで）----
+
+  function setBoldText(el, s) {
+    el.textContent = "";
+    for (const seg of splitBold(s)) {
+      if (seg.bold) {
+        const b = document.createElement("b");
+        b.textContent = seg.text;
+        el.appendChild(b);
+      } else {
+        el.appendChild(document.createTextNode(seg.text));
+      }
+    }
+  }
+
   function renderChips(el) {
     if (!el) return;
     el.textContent = "";
@@ -414,8 +453,9 @@
     if (p.badge) badge.textContent = p.badge; else badge.hidden = true;
 
     const home = $("home");
-    if (p.home && p.home.url) {
-      home.href = p.home.url;
+    const homeHref = p.home ? safeHref(p.home.url, location.href) : null;
+    if (homeHref) {
+      home.href = homeHref;
       home.textContent = p.home.label || L("home", "戻る");
     } else {
       home.hidden = true;
@@ -489,9 +529,9 @@
       } catch (_) { /* 取れなければ欄はそのまま。送っても設置側の設定で上書きされる */ }
       // 文言は内容ファイル側が持つ（案内役の言葉なので人格に合わせる）。
       // 書かれていない設置のために、中立の既定だけここに残す。
-      $("modeLabel").innerHTML = personaModeLabel || (llmEnabled
+      setBoldText($("modeLabel"), personaModeLabel || (llmEnabled
         ? L("modeLlm", '答え方: <b>決まった答え</b>＋LLM')
-        : L("modeRules", '答え方: <b>決まった答えのみ</b>（LLM は使いません）'));
+        : L("modeRules", '答え方: <b>決まった答えのみ</b>（LLM は使いません）')));
 
       if (!llmEnabled) { updateSendState(); return; }
 
@@ -638,7 +678,7 @@
               const bits = [];
               if (ev.intent) bits.push(ev.intent);
               if (ev.elapsed_seconds !== undefined) bits.push(ev.elapsed_seconds + L("seconds", " 秒"));
-              if (bits.length) meta.innerHTML += " · " + bits.join(" · ");
+              if (bits.length) meta.append(" · " + bits.join(" · "));
             } else if (ev.route === "none") {
               meta.innerHTML = '<span class="rule">● </span>';
               meta.firstChild.append(L("routeNoneName", "規則ボット"));

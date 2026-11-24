@@ -41,9 +41,10 @@ log = logging.getLogger("chat-ai.wikipedia")
 #   分かった上で使うこと。
 LANG = os.getenv("WIKIPEDIA_LANG", "ja").strip() or "ja"
 
-SEARCH = f"https://{LANG}.wikipedia.org/w/api.php"
-SUMMARY = f"https://{LANG}.wikipedia.org/api/rest_v1/page/summary/{{title}}"
-PAGE_URL = f"https://{LANG}.wikipedia.org/wiki/{{title}}"
+HOST = f"{LANG}.wikipedia.org"
+SEARCH = f"https://{HOST}/w/api.php"
+SUMMARY = f"https://{HOST}/api/rest_v1/page/summary/{{title}}"
+PAGE_URL = f"https://{HOST}/wiki/{{title}}"
 
 # 出典の名乗り。日本語版のときは従来の呼び方をそのまま保つ。
 SOURCE_LABEL = os.getenv("WIKIPEDIA_SOURCE_LABEL", "").strip() or (
@@ -51,6 +52,8 @@ SOURCE_LABEL = os.getenv("WIKIPEDIA_SOURCE_LABEL", "").strip() or (
 )
 
 TIMEOUT = httpx.Timeout(10.0, connect=5.0)
+# 転送は同じホストの https だけ、この回数まで辿る。
+MAX_REDIRECTS = 3
 
 # Wikipedia は素性の知れない大量アクセスを嫌う（規約で UA の明示を求めている）。
 # 気象庁と同じく、名乗ったうえで叩く。⚠ 配るなら CHAT_USER_AGENT を書き換えること。
@@ -201,8 +204,36 @@ async def _search_title(client: httpx.AsyncClient, term: str) -> str | None:
         if _relevant(term, hit["title"]):
             return hit["title"]
     if hits:
-        log.info("関わりの薄い結果しか無かったので捨てる: 候補=%s", [h["title"] for h in hits])
+        # 候補名は記録しない（何を調べたかが分かってしまう）。
+        log.info("関わりの薄い結果しか無かったので捨てる: 候補 %d 件", len(hits))
     return None
+
+
+def _is_page_url(url) -> bool:
+    """出典のリンクにしてよい URL か。百科事典の項目の URL だけを許す。"""
+    return (
+        isinstance(url, str)
+        and url.startswith(f"https://{HOST}/wiki/")
+        and not any(c in url for c in " \t\r\n<>()\"'")
+    )
+
+
+async def _get_same_host(client: httpx.AsyncClient, url: str) -> httpx.Response:
+    """要求を送る。転送は同じホストの https のときだけ、MAX_REDIRECTS 回まで辿る。
+
+    ⚠ client に自動で辿らせない。転送先を見る前に要求が出てしまうため。
+    """
+    resp = await client.get(url)
+    for _ in range(MAX_REDIRECTS):
+        nxt = resp.next_request
+        if nxt is None:
+            return resp
+        if nxt.url.scheme != "https" or nxt.url.host != HOST:
+            raise ValueError("想定外の転送先")
+        resp = await client.send(nxt)
+    if resp.next_request is not None:
+        raise ValueError("転送が多すぎる")
+    return resp
 
 
 def _trim(extract: str) -> str:
@@ -241,14 +272,16 @@ async def answer(text: str) -> str:
                     "言い方を変えて、もう一度お試しくだされ。"
                 )
 
-            resp = await client.get(
-                SUMMARY.format(title=urllib.parse.quote(title, safe="")),
-                follow_redirects=True,
-            )
+            resp = await _get_same_host(client, SUMMARY.format(title=urllib.parse.quote(title, safe="")))
             resp.raise_for_status()
             data = resp.json()
     except (httpx.HTTPError, ValueError) as e:
-        log.warning("Wikipedia の取得に失敗: %s", e)
+        # 例外の文には要求の URL（検索語を含む）が入るので、型と状態だけを残す。
+        log.warning(
+            "Wikipedia の取得に失敗: %s%s",
+            type(e).__name__,
+            f" status={e.response.status_code}" if isinstance(e, httpx.HTTPStatusError) else "",
+        )
         return (
             "百科事典まで使いを出したが、戻ってこなんだ。\n"
             "しばし置いてから、もう一度お試しくだされ。"
@@ -265,10 +298,8 @@ async def answer(text: str) -> str:
     if not extract:
         return f"「{title}」の項目は見つかったが、要約が空でござった。"
 
-    url = (
-        data.get("content_urls", {}).get("desktop", {}).get("page")
-        or PAGE_URL.format(title=urllib.parse.quote(title, safe=""))
-    )
+    page = data.get("content_urls", {}).get("desktop", {}).get("page")
+    url = page if _is_page_url(page) else PAGE_URL.format(title=urllib.parse.quote(title, safe=""))
 
     body = (
         f"**{data.get('title', title)}**\n\n"

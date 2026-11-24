@@ -13,6 +13,7 @@ func TestUserMessagesHideLimits(t *testing.T) {
 	msgs := map[string]string{
 		"msgTooManyRequests": msgTooManyRequests,
 		"msgQueued":          msgQueued,
+		"msgQueueFull":       msgQueueFull,
 	}
 	for name, msg := range msgs {
 		t.Run(name, func(t *testing.T) {

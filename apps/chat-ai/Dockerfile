@@ -2,11 +2,10 @@
 FROM python:3.14-slim
 WORKDIR /app
 COPY requirements.txt requirements-dev.txt ./
-# 試験の道具も既定で入れる（約5MB）。動いている器に対して
-#   docker compose exec -T chat-ai python -m pytest -q
-# を走らせられるようにするため。配る物では、これが一番使われる確かめ方になる。
-# 要らないなら --build-arg INSTALL_DEV=0 で外せる。
-ARG INSTALL_DEV=1
+# 試験の道具（pytest）は既定では入れない。動かすのに要らないものを器に置かない。
+# 動いている器で `python -m pytest -q` を走らせたいときは
+#   --build-arg INSTALL_DEV=1（compose なら build.args）で入れる。
+ARG INSTALL_DEV=0
 RUN pip install --no-cache-dir -r requirements.txt \
  && if [ "$INSTALL_DEV" = "1" ]; then pip install --no-cache-dir -r requirements-dev.txt; fi
 # ⚠ ファイル名を並べないこと。設置ごとの追加（labinfo.py など）を消したときに

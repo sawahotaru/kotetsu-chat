@@ -36,6 +36,9 @@ from router import Router
 
 log = logging.getLogger("chat-ai")
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+# 外への要求を 1 件ずつ INFO で記録させない。URL に利用者の語（調べ物の検索語など）が入るため。
+# 失敗は各処理が自分で記録する。
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # ---- 設定の読み取り ----
 #
@@ -157,7 +160,7 @@ log.info(
 )
 
 # モデルの取得状況。UI に「準備中」を出すために持つ。
-# 値は "pending" | "pulling" | "ready" | "error: <理由>"
+# 値は "pending" | "pulling" | "ready" | "error"（理由はログにだけ残す）
 model_status: dict[str, str] = {m: "pending" for m in MODELS}
 
 
@@ -177,8 +180,8 @@ async def pull_model(client: httpx.AsyncClient, model: str) -> None:
         ) as resp:
             if resp.status_code != 200:
                 body = (await resp.aread()).decode("utf-8", "replace")[:200]
-                model_status[model] = f"error: {resp.status_code} {body}"
-                log.error("pull 失敗 model=%s status=%s", model, resp.status_code)
+                model_status[model] = "error"
+                log.error("pull 失敗 model=%s status=%s body=%s", model, resp.status_code, body)
                 return
             # 進捗が流れてくる。最後の行に error が入ることがあるので読み切る。
             last_error = ""
@@ -192,11 +195,11 @@ async def pull_model(client: httpx.AsyncClient, model: str) -> None:
                 if ev.get("error"):
                     last_error = str(ev["error"])
             if last_error:
-                model_status[model] = f"error: {last_error}"
+                model_status[model] = "error"
                 log.error("pull 失敗 model=%s err=%s", model, last_error)
                 return
     except Exception as e:  # noqa: BLE001 - 起動処理なので何が来ても上げ続ける
-        model_status[model] = f"error: {e}"
+        model_status[model] = "error"
         log.exception("pull 中に例外 model=%s", model)
         return
 
@@ -245,6 +248,10 @@ app = FastAPI(
     description="チャットの後段。Ollama を呼んで生成を NDJSON で流す。",
     root_path=os.getenv("ROOT_PATH", ""),
     lifespan=lifespan,
+    # API の一覧・説明の画面は出さない（呼ぶのは前段だけ。外に見せる理由が無い）。
+    docs_url=None,
+    redoc_url=None,
+    openapi_url=None,
 )
 
 
@@ -379,7 +386,8 @@ def build_payload(req: ChatRequest) -> dict:
     """Ollama の /api/chat に渡す形へ組み立てる。"""
     model = req.model or DEFAULT_MODEL
     if model not in MODELS:
-        raise HTTPException(status_code=400, detail=f"使用できないモデルです: {model}")
+        log.warning("許可されていないモデルが指定された")
+        raise HTTPException(status_code=400, detail="使用できないモデルです")
 
     system = req.system.strip() or DEFAULT_SYSTEM
     messages = [{"role": "system", "content": system}]
@@ -419,7 +427,8 @@ async def generate(payload: dict) -> AsyncIterator[bytes]:
                     body = (await resp.aread()).decode("utf-8", "replace")[:300]
                     # 一番ありがちなのは pull がまだ終わっていないケース。
                     hint = "モデルの準備がまだ終わっていない可能性があります。" if resp.status_code == 404 else ""
-                    yield emit({"type": "error", "message": f"生成に失敗しました（{resp.status_code}）。{hint}{body}"})
+                    log.warning("生成の要求が失敗 model=%s status=%s body=%s", model, resp.status_code, body)
+                    yield emit({"type": "error", "message": f"生成に失敗しました。{hint}"})
                     return
 
                 async for line in resp.aiter_lines():
@@ -431,7 +440,8 @@ async def generate(payload: dict) -> AsyncIterator[bytes]:
                         continue
 
                     if ev.get("error"):
-                        yield emit({"type": "error", "message": str(ev["error"])})
+                        log.warning("生成中にエンジンがエラーを返した model=%s err=%s", model, str(ev["error"])[:300])
+                        yield emit({"type": "error", "message": "生成中にエラーが発生しました。時間をおいてお試しください。"})
                         return
 
                     chunk = ev.get("message", {}).get("content", "")
@@ -455,9 +465,9 @@ async def generate(payload: dict) -> AsyncIterator[bytes]:
     except httpx.ReadError:
         # 前段が接続を切った（ブラウザが閉じた）。異常ではない。
         log.info("下流が切断された model=%s", model)
-    except Exception as e:  # noqa: BLE001
+    except Exception:  # noqa: BLE001
         log.exception("生成中に例外 model=%s", model)
-        yield emit({"type": "error", "message": f"生成中にエラーが発生しました: {e}"})
+        yield emit({"type": "error", "message": "生成中にエラーが発生しました。時間をおいてお試しください。"})
 
 
 def emit(obj: dict) -> bytes:
@@ -482,9 +492,9 @@ async def respond_with_rule(text: str, intent, score: float, llm_available: bool
             answer = intent.answer
         # 「LLM を使っているか」で変わる文面をここで確定させる（口ごとに違うため）
         answer = intent_defs.apply_llm_notes(answer, llm_available)
-    except Exception as e:  # noqa: BLE001 - ハンドラが転んでも会話は続ける
+    except Exception:  # noqa: BLE001 - ハンドラが転んでも会話は続ける
         log.exception("ハンドラで例外 intent=%s", intent.name)
-        yield emit({"type": "error", "message": f"うまく調べられませんでした: {e}"})
+        yield emit({"type": "error", "message": "うまく調べられませんでした。時間をおいてお試しください。"})
         return
 
     async for chunk in respond_with_text(
@@ -531,7 +541,8 @@ async def chat(req: ChatRequest) -> StreamingResponse:
 
     intent, score = (None, 0.0)
     if ROUTING_ENABLED and mode != "llm":
-        intent, score = router.match(last_user)
+        # 照合は CPU を使う同期処理。イベントループを塞がないよう別スレッドで回す（照合は読むだけなので並行でも壊れない）。
+        intent, score = await asyncio.to_thread(router.match, last_user)
         if intent is not None:
             # ⚠ 利用者の文面は記録しない（「会話は残さぬ」と答えている以上、破ってはならぬ）。
             #    残すのは判定結果だけ。閾値の調整にはこれで足りる。

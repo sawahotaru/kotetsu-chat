@@ -40,6 +40,8 @@ services:
       # ⚠ 空（既定）なら X-Forwarded-For を一切見ず、接続元の IP で数える。
       #   逆代理の後ろに置くなら必ず書くこと（書かないと全員が逆代理の IP、つまり 1 人分の枠を分け合う）。
       CHAT_TRUSTED_NETS: ${CHAT_TRUSTED_NETS:-}
+      # 前に並ぶ逆代理の段数（gateway に直接つながる逆代理を 1 と数える）。既定 1。逆代理を 2 段重ねるなら 2。
+      CHAT_TRUSTED_HOPS: ${CHAT_TRUSTED_HOPS:-}
       # レート制限のために覚えておく利用者の数の上限。超えた分は共通の枠を分け合う。
       CHAT_RATE_MAX_KEYS: ${CHAT_RATE_MAX_KEYS:-}
       CHAT_MAX_MESSAGE_CHARS: ${CHAT_MAX_MESSAGE_CHARS:-2000}
@@ -99,7 +101,13 @@ services:
   # 後段。意図分類して規則で答え、拾えなかったものだけ（有効なら）LLM へ回す。
   # ⚠ ports を付けないこと。ここが直接外から叩けると前段のレート制限を素通りされる。
   chat-ai:
-    build: ${CHAT_SRC:-.}/apps/chat-ai
+    build:
+      context: ${CHAT_SRC:-.}/apps/chat-ai
+      args:
+        # 試験の道具（pytest）を器に入れる。内容を書き換えたら
+        # `docker compose exec -T chat-ai python -m pytest -q` で確かめるため。
+        # 誰でも使える場所に置くなら "0" にしてよい（動かすのには要らない）。
+        INSTALL_DEV: "1"
     restart: unless-stopped
     mem_limit: 256m
     environment:

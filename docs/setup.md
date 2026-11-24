@@ -161,6 +161,7 @@ CHAT_USER_AGENT=my-site chat (+https://example.com/)   # ⚠ 必ず書き換え�
 | `CHAT_SITE_HANDLERS` | （空） | 設置ごとの追加処理 |
 | `CHAT_RATE_PER_MIN` / `CHAT_RATE_BURST` | `12` / `5` | IP ごとのレート制限 |
 | `CHAT_TRUSTED_NETS` | （空） | 前に置いた逆代理のアドレス。空なら転送ヘッダーを見ず、接続元の IP で数える |
+| `CHAT_TRUSTED_HOPS` | `1` | 前に並ぶ逆代理の段数。逆代理を重ねるならその数 |
 | `CHAT_MAX_MESSAGE_CHARS` | `2000` | 1通の長さの上限 |
 | `CHAT_MAX_HISTORY` | `8` | 後段へ送る往復数 |
 | `CHAT_LLM_ENABLED` | `0` | 後段が LLM を使える状態か |
@@ -201,6 +202,7 @@ Caddy か nginx を前に置き、`chat-gateway` は逆代理からだけ届く�
 `chat-ai` を直接外に出してはならない（前段のレート制限を素通りされる）。
 
 逆代理のアドレスを `CHAT_TRUSTED_NETS` に書くこと。書かないと、全員が逆代理の IP として数えられ、1 人分の枠を分け合う。
+逆代理を 2 段以上重ねるなら、`CHAT_TRUSTED_HOPS` にその段数を書くこと。書かないと（既定 1）、全員が手前の逆代理の IP として数えられ、少ない枠を分け合う。
 
 ### 2. レート制限を緩めない
 
@@ -252,7 +254,7 @@ Web（匿名・誰でも来る）は `0`、LINE（友だち追加済み・相手
 ## 動いているか確かめる
 
 ```bash
-curl -s http://127.0.0.1:8080/healthz                 # → {"status":"ok","version":"0.1.1"}
+curl -s http://127.0.0.1:8080/healthz                 # → "status":"ok" を含む JSON が返る
 curl -s http://127.0.0.1:8080/api/persona | head -c 200   # 画面に配る中身
 docker compose exec -T chat-ai python -m pytest -q    # 意図分類の回帰
 docker compose logs -f chat-gateway
@@ -265,12 +267,12 @@ docker compose logs -f chat-gateway
 
 ## 版
 
-前段と後段は**揃った版**で配る。どちらの `/healthz` にも出るので、
+前段と後段は**揃った版**で配る。版はそれぞれの起動ログに出るので、
 配った先で「何が動いているのか」を確かめられる（イメージのタグは付け替えられる）。
 
 ```bash
-curl -s http://127.0.0.1:8080/healthz            # 前段
-docker compose logs chat-ai | head -1            # 後段（起動ログの先頭）
+docker compose logs chat-gateway | grep -m1 '起動'      # 前段
+docker compose logs chat-ai | grep -m1 '設定 LLM='     # 後段
 ```
 
 変更の記録は配布元で管理している。
